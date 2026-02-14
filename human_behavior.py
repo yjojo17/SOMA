@@ -92,6 +92,20 @@ class HumanBehavior:
     def should_back_scroll(self) -> bool:
         """Occasional backwards scroll: 5%"""
         return random.random() < 0.05
+    
+    def should_like_post(self) -> bool:
+        """
+        Random chance to like a post (10%)
+        Simulates natural engagement behavior
+        """
+        return random.random() < 0.10
+    
+    def like_delay(self) -> float:
+        """
+        Delay before/after liking (0.3-1.5s)
+        Quick action but not instant
+        """
+        return random.uniform(0.3, 1.5)
         
     def mouse_movement(self, driver, element=None) -> Optional[Dict]:
         """
