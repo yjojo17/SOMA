@@ -63,7 +63,7 @@ class HumanBehavior:
         viewport_h = driver.execute_script("return window.innerHeight;")
         
         # Scroll distance: 30-90% of viewport height
-        scroll_percent = random.uniform(0.3, 0.9)
+        scroll_percent = random.uniform(0.3, 0.6)
         distance = int(viewport_h * scroll_percent)
         
         # Multi-step scroll with easing (more human-like)
@@ -93,13 +93,21 @@ class HumanBehavior:
         """Occasional backwards scroll: 5%"""
         return random.random() < 0.05
     
+    def pre_like_pause(self) -> float:
+        """Simulates the moment a user decides they like the content."""
+        return random.uniform(0.5, 2.0)
+
     def should_like_post(self) -> bool:
         """
         Random chance to like a post (10%)
         Simulates natural engagement behavior
         """
-        return random.random() < 0.10
+        return random.random() < 0.7
     
+    def double_tap_likelihood(self) -> bool:
+        """Humans often like by double-tapping the image rather than the heart."""
+        return random.random() < 0.70
+
     def like_delay(self) -> float:
         """
         Delay before/after liking (0.3-1.5s)

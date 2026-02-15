@@ -25,14 +25,21 @@ class ActionLogger:
             'pauses': 0,
             'mouse_moves': 0,
             'api_calls': 0,
-            'posts_viewed': 0
+            'posts_viewed': 0,
+            'like': 0
         }
 
     def set_active_post(self, post_data: Optional[Dict]):
-        """Call this whenever the bot identifies a new post in the viewport center."""
-        self.current_post_context = post_data
-        if post_data:
-            self.stats['posts_viewed'] += 1
+            """Updated: Store minimal context to avoid redundant data."""
+            if post_data:
+                self.current_post_context = {
+                    'post_id': post_data.get('pk'),
+                    'profile_name': post_data.get('profile_name'),
+                    'postLink': post_data.get('postLink')
+                }
+                self.stats['posts_viewed'] += 1
+            else:
+                self.current_post_context = None
 
     def log_action(self, action_type: str, details: Dict[str, Any]):
         """Log any interaction, always stamping the currently active post context."""
@@ -47,16 +54,10 @@ class ActionLogger:
 
         self.actions.append(log_entry)
 
-        if action_type == 'scroll':
-            self.stats['scrolls'] += 1
-        elif action_type == 'pause':
-            self.stats['pauses'] += 1
-        elif action_type == 'mouse_move':
-            self.stats['mouse_moves'] += 1
-        elif action_type == 'api_intercept':
-            self.stats['api_calls'] += 1
-
-        self.logger.debug(f"{action_type}: {details}")
+        if action_type in self.stats:
+            self.stats[action_type] += 1
+            
+        self.logger.debug(f"{action_type} for {self.account_name}")
 
     def log_scroll(self, scroll_data: Dict, scroll_position: int = 0):
         scroll_data['scroll_position_px'] = scroll_position

@@ -144,6 +144,7 @@ class SeleniumWireInterceptor:
             )
             
             post_data = {
+                'pk': media.get('pk') or media.get('id', ''),
                 'collected_at': datetime.now().isoformat(),
                 'api_source': True,
                 'postLink': self._get_post_link(media),

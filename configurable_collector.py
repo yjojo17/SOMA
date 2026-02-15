@@ -19,6 +19,7 @@ from selenium.webdriver.firefox.options import Options
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.common.action_chains import ActionChains
 from seleniumwire import webdriver as wire_webdriver
 
 from seleniumwire_interceptor import SeleniumWireInterceptor
@@ -100,7 +101,7 @@ class ConfigurableNetworkCollector:
             return None
 
     def update_context(self):
-        """Syncs network data and sets the active post by matching DOM link to intercepted data."""
+        """Returns the centered article element, or None if no match."""
         self.interceptor.process_requests(self.driver)
         captured_posts = self.interceptor.get_posts()
 
@@ -116,13 +117,33 @@ class ConfigurableNetworkCollector:
                     for post_data in captured_posts:
                         if post_data.get('postLink') == link:
                             self.action_logger.set_active_post(post_data)
-                            return True
-                # Article is in view but no link match found yet (data not yet intercepted)
+                            return article  # ← return the element, not True
                 self.action_logger.set_active_post(None)
-                return False
+                return None
 
         self.action_logger.set_active_post(None)
-        return False
+        return None
+    
+    def perform_like_action(self, article):
+        try:
+            time.sleep(self.human_behavior.pre_like_pause())
+
+            if self.human_behavior.double_tap_likelihood():
+                photo = article.find_element(By.XPATH, ".//img[@style]")
+                ActionChains(self.driver).double_click(photo).perform()
+                method = "double_tap"
+            else:
+                btn = article.find_element(By.XPATH, ".//button[@type='button'][.//*[@aria-label='Like']]")
+                btn.click()
+                method = "heart_button"
+
+            self.action_logger.log_like()
+            time.sleep(self.human_behavior.post_like_pause())
+            return True
+
+        except Exception as e:
+            self.logger.warning(f"Like failed: {e}")
+            return False
 
     def initialize_browser(self):
         if self.use_virtual_display:
@@ -208,32 +229,31 @@ class ConfigurableNetworkCollector:
             while scroll_count < max_scrolls and time.time() < session_end_time:
                 # 1. Update the state: Find what post is in the center of the viewport
                 scroll_data = self.human_behavior.variable_scroll(self.driver)
+                time.sleep(0.5)
                 self.current_scroll_position = self.driver.execute_script("return window.pageYOffset;")
 
 
-                self.update_context()
+                article = self.update_context()
                 self.action_logger.log_scroll(scroll_data, self.current_scroll_position)
 
 
                 # self.interceptor.process_requests(self.driver)
                 # posts_captured = len(self.interceptor.get_posts())
-
                 # self.logger.info(f"Posts: {posts_captured}/{target_posts}, scroll: {scroll_count}")
-                
                 # if posts_captured >= target_posts:
                 #    break
-                                
                 # 2. Log scroll: post_context=None tells the logger to use self.current_post_context
-
-                
                 #base_delay = self.human_behavior.scroll_delay()
-                
+                # 4. Engagement: Like Action (The influential factor being tested [cite: 120]
+
                 # Capture Viewport Dwell Time (Key Personalization Factor)
                 if self.human_behavior.should_pause():
                     pause_duration = self.human_behavior.pause_duration()
                     self.action_logger.log_pause(duration=pause_duration)
                     time.sleep(pause_duration)
 
+                    if self.human_behavior.should_like_post():
+                        self.perform_like_action(article)
                 # Check if we've reached the target
                 if len(self.interceptor.get_posts()) >= target_posts:
                     break
@@ -267,11 +287,6 @@ class ConfigurableNetworkCollector:
                 post['region'] = self.profile_config['region']
                 post['position'] = i + 1
                 post['collection_timestamp'] = datetime.now().isoformat()
-                
-                self.action_logger.log_post_view(
-                    post_id=post.get('pk', f'unknown_{i}'),
-                    post_data=post
-                )
             
             self.logger.info(f"Collection complete: {len(network_posts)} posts")
             
