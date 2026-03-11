@@ -21,11 +21,12 @@ class ActionLogger:
         self.logger = logging.getLogger(f'action_logger_{account_name}')
 
         self.stats = {
-            'scrolls': 0,
-            'pauses': 0,
-            'mouse_moves': 0,
-            'api_calls': 0,
+            'scroll': 0,
+            'pause': 0,
+            'mouse_move': 0,
+            'api_intercept': 0,
             'posts_viewed': 0,
+            'follow': 0,
             'like': 0
         }
 
@@ -67,12 +68,10 @@ class ActionLogger:
         self.log_action('pause', {'duration': duration, 'reason': reason})
 
     def log_like(self):
-        """Logs a like for the current active post."""
-        if self.current_post_context:
-            self.log_action('like', {
-                'post_id': self.current_post_context.get('pk'),
-                'username': self.current_post_context.get('profile_name')
-            })
+        self.log_action('like', {
+            'post_id': self.current_post_context.get('post_id') if self.current_post_context else None,
+            'username': self.current_post_context.get('profile_name') if self.current_post_context else None
+        })
 
     def log_mouse_move(self, movement_data: Dict):
         self.log_action('mouse_move', movement_data)

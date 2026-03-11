@@ -177,8 +177,11 @@ class SeleniumWireInterceptor:
     
     def _get_post_link(self, media: Dict) -> str:
         code = media.get('code') or media.get('shortcode')
-        if code:
-            return f"https://www.instagram.com/p/{code}/"
+        username = self._get_username(media)
+        if code and username:
+            is_reel = media.get('product_type') == 'clips'
+            path = 'reel' if is_reel else 'p'
+            return f"https://www.instagram.com/{username}/{path}/{code}/"
         
         pk = media.get('pk') or media.get('id')
         if pk:
