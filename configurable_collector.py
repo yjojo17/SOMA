@@ -1,6 +1,6 @@
 """
 Configurable Multi-Account Instagram Feed Collector
-Clean version with suggested post detection
+With TimescaleDB persistence and raw-response archive.
 """
 import sys
 import time
@@ -22,79 +22,91 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import StaleElementReferenceException
 from selenium.webdriver.common.action_chains import ActionChains
 from seleniumwire import webdriver as wire_webdriver
-from selenium.webdriver.firefox.service import Service
 
 from seleniumwire_interceptor import SeleniumWireInterceptor
 from human_behavior import HumanBehavior
 from action_logger import ActionLogger
+from db.database_manager import DatabaseManager
+from db.raw_archive import RawArchive
+from monitoring.metrics_pusher import MetricsPusher
 
 
 class ConfigurableNetworkCollector:
-    
+
     def __init__(self, profile_id: str, config_file: str = 'research_config.yaml', use_virtual_display: bool = False):
         self.profile_id = profile_id
         self.config_file = config_file
         self.use_virtual_display = use_virtual_display
-        
+
         self.config = self._load_config()
         self.profile_config = self._get_profile_config(profile_id)
-        
+
+        self.passive_mode = self.config['collection_settings'].get('passive_mode', False)
+        self.do_interact = (
+            self.profile_config.get('condition') == 'interaction'
+            and not self.passive_mode
+        )
+
         self.logger = self._setup_logging()
-        
+
         self.display = None
         self.driver = None
-        self.interceptor = SeleniumWireInterceptor()
         self.human_behavior = HumanBehavior(self.logger)
         self.action_logger = None
-        
+
+        # Per-session state, set in collect_feed
+        self.session_id: Optional[str] = None
+        self.db: Optional[DatabaseManager] = None
+        self.archive: Optional[RawArchive] = None
+        self.interceptor: Optional[SeleniumWireInterceptor] = None
+        self.pusher: Optional[MetricsPusher] = None
+
         self.current_scroll_position = 0
         self.current_post_data = None
         self.followed_accounts = set()
         self.attempted_like_posts = set()
         self.attempted_follow_posts = set()
         self.processed_posts = set()  # posts that have been fully dwelt on
-        self.video_watch_pct = self.config['collection_settings'].get('video_watch_percentage', 0.5)
-        
+        self.video_watch_pct = self.config['collection_settings'].get('video_watch_percentage', 0.1)
+        self.passive_mode = self.config['collection_settings'].get('passive_mode', False)
+
     def _load_config(self) -> Dict:
         with open(self.config_file, 'r') as f:
             return yaml.safe_load(f)
-    
+
     def _get_profile_config(self, profile_id: str) -> Dict:
         for profile in self.config['research_profiles']:
             if profile['id'] == profile_id:
                 return profile
         raise ValueError(f"Profile {profile_id} not found in configuration")
-    
+
     def _setup_logging(self) -> logging.Logger:
         log_dir = Path('logs')
         log_dir.mkdir(exist_ok=True)
-        
+
         logger = logging.getLogger(f'collector_{self.profile_id}')
         logger.setLevel(logging.INFO)
-        
+
         fh = logging.FileHandler(log_dir / f'{self.profile_id}.log')
         fh.setLevel(logging.INFO)
-        
+
         formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
         fh.setFormatter(formatter)
         logger.addHandler(fh)
-        
+
         return logger
-    
+
     def get_current_post_in_view(self):
         """Identifies which post is currently most visible in the viewport."""
         articles = self.driver.find_elements(By.TAG_NAME, 'article')
         viewport_height = self.driver.execute_script("return window.innerHeight;")
-        
+
         for index, article in enumerate(articles):
-            # Get position of the article relative to the viewport
             position = self.driver.execute_script(
                 "return arguments[0].getBoundingClientRect();", article
             )
-            
-            # If the top of the post is in the middle 50% of the screen, it's the active post
+
             if 0 <= position['top'] <= (viewport_height * 0.5):
-                # Map this to your intercepted posts (this assumes linear order)
                 network_posts = self.interceptor.get_posts()
                 if index < len(network_posts):
                     return network_posts[index]
@@ -127,12 +139,10 @@ class ConfigurableNetworkCollector:
                             self.action_logger.set_active_post(post_data)
                             self.current_post_data = post_data
                             return article
-                    # Link found in DOM but not yet in network data — still return the element
-                    self.logger.info(f"  -> article not yet in network data, returning element anyway")
+                    self.logger.info("  -> article not yet in network data, returning element anyway")
                     self.action_logger.set_active_post(None)
                     self.current_post_data = None
                     return article
-                # No link at all (e.g. ad unit) — don't return element
                 self.action_logger.set_active_post(None)
                 self.current_post_data = None
                 return None
@@ -152,7 +162,8 @@ class ConfigurableNetworkCollector:
         """
         return self.driver.execute_script("""
             return arguments[0].querySelector('[aria-label="Next"]') !== null
-                || arguments[0].querySelector('[aria-label="Nächstes"]') !== null;
+                || arguments[0].querySelector('[aria-label="Nächstes"]') !== null
+                || arguments[0].querySelector('[aria-label="Weiter"]') !== null;
         """, article)
 
     def _handle_carousel(self, article):
@@ -164,25 +175,23 @@ class ConfigurableNetworkCollector:
         """
         slide_num = 0
         while True:
-            # Dwell on current visible slide only
             is_video = self._is_video_article(article)
             self.logger.info(f"Carousel slide {slide_num}: {'video' if is_video else 'image'}")
             if is_video:
                 self._wait_for_video_progress(article, self.video_watch_pct)
             else:
-                time.sleep(random.uniform(1.5, 3.5))  # image slide dwell
+                time.sleep(random.uniform(1.5, 3.5))
 
-            # Find next button — if gone, we're on the last slide
             next_btn = self.driver.execute_script("""
                 return arguments[0].querySelector('[aria-label="Next"]')
-                    || arguments[0].querySelector('[aria-label="Nächstes"]');
+                    || arguments[0].querySelector('[aria-label="Nächstes"]')
+                    || arguments[0].querySelector('[aria-label="Weiter"]');
             """, article)
             if next_btn is None:
                 break
 
             self.driver.execute_script("arguments[0].click();", next_btn)
-            time.sleep(random.uniform(2.0, 3.5))  # wait for slide transition to fully complete before re-evaluating
-            # Trigger play on the newly visible slide if it contains a paused video
+            time.sleep(random.uniform(2.0, 3.5))
             self.driver.execute_script("""
                 var videos = arguments[0].querySelectorAll('video');
                 for (var v of videos) {
@@ -250,7 +259,7 @@ class ConfigurableNetworkCollector:
     def perform_like_action(self, article):
         try:
             rect = self.driver.execute_script("return arguments[0].getBoundingClientRect();", article)
-            self.logger.info(f"perform_like_action: article rect top={rect['top']:.0f}, bottom={rect['bottom']:.0f}, height={rect['height']:.0f}") 
+            self.logger.info(f"perform_like_action: article rect top={rect['top']:.0f}, bottom={rect['bottom']:.0f}, height={rect['height']:.0f}")
             time.sleep(self.human_behavior.pre_like_pause())
 
             all_labeled = article.find_elements(By.XPATH, ".//*[@aria-label]")
@@ -258,11 +267,11 @@ class ConfigurableNetworkCollector:
             for el in all_labeled:
                 label = el.get_attribute('aria-label')
                 self.logger.info(f"  tag={el.tag_name}, aria-label='{label}'")
-                if label == 'Like':
+                if label == 'Like' or label == 'Gefällt mir':
                     like_el = el
 
             photo_elements = article.find_elements(By.XPATH, ".//img[@style]")
-            
+
             if self.human_behavior.double_tap_likelihood() and photo_elements:
                 self.logger.info("Like attempt: double_tap")
                 ActionChains(self.driver).double_click(photo_elements[0]).perform()
@@ -290,7 +299,7 @@ class ConfigurableNetworkCollector:
         """Detects suggested post indicator from the DOM when network data isn't available yet."""
         try:
             article.find_element(
-                By.XPATH, ".//*[contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'suggested for you')]"
+                By.XPATH, ".//*[contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'suggested for you') or contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'vorgeschlagen')]"
             )
             return True
         except Exception:
@@ -301,7 +310,6 @@ class ConfigurableNetworkCollector:
         try:
             link = article.find_element(By.XPATH, ".//header//a[@href]")
             href = link.get_attribute('href')
-            # href is like https://www.instagram.com/username/
             return href.rstrip('/').split('/')[-1]
         except Exception:
             return ''
@@ -310,7 +318,6 @@ class ConfigurableNetworkCollector:
         try:
             self.logger.info("In following function")
 
-            # Dump all role="button" elements to find the Follow button structure
             role_buttons = article.find_elements(By.XPATH, ".//*[@role='button']")
             for el in role_buttons:
                 self.logger.info(f"  role=button tag={el.tag_name} text='{el.text.strip()[:50]}' aria-label='{el.get_attribute('aria-label')}'")
@@ -340,57 +347,47 @@ class ConfigurableNetworkCollector:
         except Exception as e:
             self.logger.warning(f"Follow failed for {username}: {e}")
             return False
-            
+
     def initialize_browser(self):
         if self.use_virtual_display:
             self.display = Display(visible=0, size=(800, 600))
             self.display.start()
             self.logger.info(f"Virtual display started for {self.profile_id}")
-        
+
         options = Options()
-        
+
         firefox_profile = self.profile_config['firefox_profile']
         options.add_argument('-profile')
         options.add_argument(firefox_profile)
-        
-        user_agent = self.profile_config.get('user_agent', 
+
+        user_agent = self.profile_config.get('user_agent',
             'Mozilla/5.0 (iPhone; CPU iPhone OS 15_0 like Mac OS X) AppleWebKit/605.1.15')
         options.set_preference("general.useragent.override", user_agent)
-        
+
         options.set_preference("layout.css.devPixelsPerPx", "1.0")
         options.set_preference("layout.viewport.width", "390")
         options.set_preference("layout.viewport.height", "844")
-        
+
         options.set_preference("dom.webdriver.enabled", False)
         options.set_preference("useAutomationExtension", False)
         options.set_preference("privacy.trackingprotection.enabled", False)
         options.set_preference("network.http.referer.spoofSource", True)
-        
+
         options.set_preference("permissions.default.image", 1)
         options.set_preference("browser.display.show_image_placeholders", True)
-        
+
         seleniumwire_options = {
             'disable_encoding': True
         }
-        
-        #proxy_id = self.profile_config.get('proxy')
-        #if proxy_id and proxy_id in self.config.get('proxies', {}):
-        #    proxy_config = self.config['proxies'][proxy_id]
-        #    seleniumwire_options['proxy'] = {
-        #        'http': f'http://{proxy_config["credentials"]["username"]}:{proxy_config["credentials"]["password"]}@{proxy_config["host"]}:{proxy_config["port"]}',
-        #        'https': f'https://{proxy_config["credentials"]["username"]}:{proxy_config["credentials"]["password"]}@{proxy_config["host"]}:{proxy_config["port"]}',
-        #        'no_proxy': 'localhost,127.0.0.1'
-        #    }
-        #    self.logger.info(f"Using proxy: {proxy_config['location']}")
-        
+
         self.driver = wire_webdriver.Firefox(
             service=Service('/usr/local/bin/geckodriver'),
             options=options,
             seleniumwire_options=seleniumwire_options
         )
-        
+
         self.driver.set_window_size(500, 926)
-        
+
         self.driver.execute_script("""
             Object.defineProperty(navigator, 'webdriver', {
                 get: () => undefined
@@ -402,33 +399,64 @@ class ConfigurableNetworkCollector:
                 get: () => undefined
             });
         """)
-        
+
         self.logger.info(f"Browser initialized for {self.profile_id}")
-    
+
     def collect_feed(self, target_posts: int = 50) -> List[Dict]:
-        self.action_logger = ActionLogger(self.profile_id)
-        
+        # 1. Generate session id, open DB, register session, instantiate archive + interceptor + metrics pusher.
+        # Per decision: fail loudly if either the DB or Pushgateway is unreachable at session start.
+        started_at = datetime.now()
+        self.session_id = f"{self.profile_id}_{started_at.strftime('%Y%m%d_%H%M%S')}"
+
+        self.db = DatabaseManager()
+        self.db.connect()
+
+        self.pusher = MetricsPusher(account_id=self.profile_id, session_id=self.session_id)
+        self.pusher.connect()
+
+        self.db.ensure_account(
+            account_id=self.profile_id,
+            email=self.profile_config['email'],
+            firefox_profile=self.profile_config['firefox_profile'],
+            role=self.profile_config['role'],          # 'study'
+            bucket=self.profile_config.get('bucket'),  # None for study
+            assigned_interests=self.profile_config.get('assigned_interests'),  # ['Control', 'Fit', 'BandF']
+            gender=self.profile_config.get('gender'),  # 'F' or 'M'
+            condition=self.profile_config.get('condition'),  # 'interaction' or 'no_interaction'
+        )
+
+        self.action_logger = ActionLogger(self.profile_id, session_id=self.session_id)
+        self.archive = RawArchive(self.profile_id, self.session_id)
+        self.interceptor = SeleniumWireInterceptor(archive=self.archive)
+
         session_duration_minutes = self.human_behavior.realistic_session_duration()
         session_end_time = time.time() + (session_duration_minutes * 60)
-        
+
+        self.db.insert_session(
+            session_id=self.session_id,
+            account_id=self.profile_id,
+            started_at=started_at,
+            planned_duration_seconds=int(session_duration_minutes * 60),
+            target_posts=target_posts,
+        )
+
         self.action_logger.log_session_start({
             'target_posts': target_posts,
             'profile_id': self.profile_id,
-            'region': self.profile_config['region'],
+            'role': self.profile_config['role'],
             'use_virtual_display': self.use_virtual_display,
             'planned_duration': session_duration_minutes
         })
-        
-        self.logger.info(f"Collection started: {self.profile_id} (target: {target_posts}, duration: {session_duration_minutes}min)")
-        
+
+        self.logger.info(f"Collection started: session={self.session_id} target={target_posts} duration={session_duration_minutes}min")
+
         try:
             self.driver.get('https://www.instagram.com/')
-            # Wait for first content
             WebDriverWait(self.driver, 10).until(EC.presence_of_element_located((By.TAG_NAME, 'article')))
-            
+
             scroll_count = 0
-            max_scrolls = 50
-            
+            max_scrolls = 200
+
             while scroll_count < max_scrolls and time.time() < session_end_time:
                 # 1. What is centered right now — before any scrolling
                 article = self.update_context()
@@ -438,22 +466,31 @@ class ConfigurableNetworkCollector:
                     or ''
                 )
 
+                dwell_start = time.time()
+                is_new_post = article is not None and post_link and post_link not in self.processed_posts
+
                 # 2. Dwell on whatever is centered — skip if already processed
                 if article is None or post_link in self.processed_posts:
                     time.sleep(random.uniform(0.3, 0.7))
                 elif self._is_carousel_article(article):
-                    self._handle_carousel(article)
+                    if self.do_interact:
+                        self._handle_carousel(article)
+                    else:
+                        time.sleep(random.uniform(1.5, 3.5))
                     self.processed_posts.add(post_link)
-                    if self.human_behavior.should_like_post():
+                    if self.human_behavior.should_like_post() and self.do_interact:
                         if post_link not in self.attempted_like_posts:
                             self.attempted_like_posts.add(post_link)
                             liked = self.perform_like_action(article)
                             if liked:
                                 time.sleep(random.uniform(1.5, 3.0))
                 elif self._is_video_article(article):
-                    self._wait_for_video_progress(article, self.video_watch_pct)
+                    if self.do_interact:
+                        self._wait_for_video_progress(article, self.video_watch_pct)
+                    else:
+                        time.sleep(random.uniform(2.0, 4.0))
                     self.processed_posts.add(post_link)
-                    if self.human_behavior.should_like_post():
+                    if self.human_behavior.should_like_post() and self.do_interact  :
                         if post_link not in self.attempted_like_posts:
                             self.attempted_like_posts.add(post_link)
                             liked = self.perform_like_action(article)
@@ -464,7 +501,7 @@ class ConfigurableNetworkCollector:
                         pause_duration = self.human_behavior.pause_duration()
                         self.action_logger.log_pause(duration=pause_duration)
                         time.sleep(pause_duration)
-                        if self.human_behavior.should_like_post():
+                        if self.human_behavior.should_like_post() and self.do_interact:
                             if post_link not in self.attempted_like_posts:
                                 self.attempted_like_posts.add(post_link)
                                 liked = self.perform_like_action(article)
@@ -488,6 +525,12 @@ class ConfigurableNetworkCollector:
                         if username and username not in self.followed_accounts:
                             self.perform_follow_action(article, username)
 
+                # Log total dwell time for newly processed posts (all types)
+                if is_new_post and post_link in self.processed_posts:
+                    self.action_logger.log_action('post_view', {
+                        'duration_s': round(time.time() - dwell_start, 2)
+                    })
+
                 # 4. Check target before scrolling further
                 if len(self.interceptor.get_posts()) >= target_posts:
                     break
@@ -510,24 +553,28 @@ class ConfigurableNetworkCollector:
 
                 time.sleep(self.human_behavior.scroll_delay())
                 scroll_count += 1
-            
+
+                # Strategic mid-session push every 10 scrolls so a mid-run crash
+                # still leaves observable metrics in Prometheus.
+                if scroll_count % 10 == 0:
+                    self.pusher.push()
+
             self.interceptor.process_requests(self.driver)
             network_posts = self.interceptor.get_posts()
-            
+
             self.action_logger.log_api_intercept(
                 endpoint='feed/timeline',
                 posts_count=len(network_posts)
             )
-            
+
             for i, post in enumerate(network_posts):
                 post['profile_id'] = self.profile_id
                 post['profile_email'] = self.profile_config['email']
-                post['region'] = self.profile_config['region']
                 post['position'] = i + 1
                 post['collection_timestamp'] = datetime.now().isoformat()
-            
+
             self.logger.info(f"Collection complete: {len(network_posts)} posts")
-            
+
             final_stats = {
                 'posts_collected': len(network_posts),
                 'scrolls_performed': scroll_count,
@@ -537,54 +584,104 @@ class ConfigurableNetworkCollector:
                 'followed_suggested': len(self.followed_accounts)
             }
             self.action_logger.log_session_end(final_stats)
-            
-            self.action_logger.save_session()
+
+            # Populate pusher with final counts. Counters were not incremented
+            # during the loop because posts_collected is only known post-hoc
+            # (interceptor deduplicates). This is the authoritative final count.
+            self.pusher.record_posts_collected(final_stats['posts_collected'])
+            self.pusher.record_posts_suggested(final_stats['suggested_posts'])
+            self.pusher.record_posts_followed(final_stats['followed_posts'])
+            self.pusher.record_api_intercept('feed/timeline', count=1)
+
+            self._persist_session(network_posts, status='completed', final_stats=final_stats)
             self.action_logger.print_summary()
-            
+
             return network_posts[:target_posts]
-            
+
         except Exception as e:
             import traceback
             self.logger.error(f"Collection error: {str(e)}\n{traceback.format_exc()}")
             self.action_logger.log_error('collection_error', str(e))
-            self.action_logger.save_session()
+            if self.pusher:
+                self.pusher.record_error('collection_error')
+            try:
+                partial_posts = self.interceptor.get_posts() if self.interceptor else []
+                partial_stats = {'posts_collected': len(partial_posts), 'error': str(e)}
+                if self.pusher:
+                    self.pusher.record_posts_collected(len(partial_posts))
+                self._persist_session(partial_posts, status='errored', final_stats=partial_stats)
+            except Exception as persist_err:
+                self.logger.error(f"Persist on error also failed: {persist_err}")
             return []
-    
+
+    def _persist_session(self, network_posts: List[Dict], status: str, final_stats: Dict):
+        """Close raw archive, write posts + interactions, finalize session row and metrics."""
+        archive_path = self.archive.close() if self.archive else None
+
+        pk_to_id = self.db.insert_posts(
+            session_id=self.session_id,
+            account_id=self.profile_id,
+            posts=network_posts,
+        )
+        self.db.insert_interactions(
+            session_id=self.session_id,
+            account_id=self.profile_id,
+            actions=self.action_logger.actions,
+            post_pk_to_id=pk_to_id,
+        )
+        ended_at = datetime.now()
+        self.db.finalize_session(
+            session_id=self.session_id,
+            ended_at=ended_at,
+            status=status,
+            final_stats=final_stats,
+            raw_archive_path=archive_path,
+        )
+        # Final metrics push — fails loudly per decision.
+        if self.pusher:
+            duration = (ended_at - self.action_logger.session_start).total_seconds()
+            self.pusher.finalize(duration_seconds=duration, status=status)
+
     def save_feed_data(self, data):
+        """Legacy JSONL dump, kept as dead code. DB + raw archive are the source of truth."""
         if not data:
             self.logger.warning("No data to save")
             return None
-        
+
         output_dir = Path('feed_data')
         output_dir.mkdir(exist_ok=True)
-        
+
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         filename = f"feed_{self.profile_id}_{timestamp}.json"
         filepath = output_dir / filename
-        
+
         with open(filepath, 'w', encoding='utf-8') as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
-        
+
         self.logger.info(f"Saved {len(data)} posts to {filename}")
         return str(filepath)
-    
+
     def cleanup(self):
         if self.driver:
             self.driver.quit()
             self.logger.info(f"Browser closed for {self.profile_id}")
-        
+
         if self.display:
             self.display.stop()
             self.logger.info(f"Virtual display stopped for {self.profile_id}")
 
+        if self.db:
+            self.db.close()
+            self.db = None
+
 
 def main():
     logging.basicConfig(level=logging.INFO)
-    
+
     test_profiles = ["profile_de_01"]
     target_posts = 50
     delay_between_profiles = (300, 600)
-    
+
     print("\n" + "="*70)
     print(" MULTI-ACCOUNT COLLECTION TEST")
     print("="*70)
@@ -592,61 +689,59 @@ def main():
     print(f"Target posts per profile: {target_posts}")
     print(f"Delay between profiles: {delay_between_profiles[0]}-{delay_between_profiles[1]}s")
     print("="*70 + "\n")
-    
+
     results = {}
-    
+
     for i, profile_id in enumerate(test_profiles):
         print(f"\n{'='*70}")
         print(f" PROFILE {i+1}/{len(test_profiles)}: {profile_id}")
         print(f"{'='*70}\n")
-        
+
         collector = None
-        
+
         try:
             collector = ConfigurableNetworkCollector(
                 profile_id=profile_id,
                 use_virtual_display=False
             )
-            
+
             collector.initialize_browser()
             feed_data = collector.collect_feed(target_posts=target_posts)
-            
+
             if feed_data:
-                filepath = collector.save_feed_data(feed_data)
                 results[profile_id] = {
                     'success': True,
                     'posts_collected': len(feed_data),
                     'suggested_count': sum(1 for p in feed_data if p.get('is_suggested', False)),
                     'followed_count': sum(1 for p in feed_data if p.get('is_following', False)),
-                    'file': filepath
+                    'session_id': collector.session_id,
                 }
-                print(f"\n✓ {profile_id}: {len(feed_data)} posts collected")
+                print(f"\n✓ {profile_id}: {len(feed_data)} posts collected (session {collector.session_id})")
                 print(f"  Suggested: {results[profile_id]['suggested_count']}")
                 print(f"  Followed: {results[profile_id]['followed_count']}")
-                print(f"  File: {filepath}")
             else:
                 results[profile_id] = {'success': False, 'error': 'No data collected'}
                 print(f"\n✗ {profile_id}: Collection failed")
-            
+
         except Exception as e:
             results[profile_id] = {'success': False, 'error': str(e)}
             print(f"\n✗ {profile_id}: Error - {e}")
-        
+
         finally:
             if collector:
                 collector.cleanup()
-        
+
         if i < len(test_profiles) - 1:
             delay = random.uniform(*delay_between_profiles)
             print(f"\n⏳ Waiting {delay/60:.1f} minutes before next profile...")
             time.sleep(delay)
-    
+
     print("\n" + "="*70)
     print(" COLLECTION SUMMARY")
     print("="*70)
     for profile_id, result in results.items():
         if result['success']:
-            print(f"✓ {profile_id}: {result['posts_collected']} posts " +
+            print(f"✓ {profile_id}: {result['posts_collected']} posts "
                   f"(Suggested: {result['suggested_count']}, Followed: {result['followed_count']})")
         else:
             print(f"✗ {profile_id}: {result.get('error', 'Unknown error')}")

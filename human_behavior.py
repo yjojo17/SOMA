@@ -106,11 +106,11 @@ class HumanBehavior:
         Random chance to like a post (10%)
         Simulates natural engagement behavior
         """
-        return random.random() < 0.2
+        return random.random() < 0.05
     
     def double_tap_likelihood(self) -> bool:
         """People often like by double-tapping the image rather than the heart."""
-        return random.random() < 0.10
+        return random.random() < 0.025
 
     def like_delay(self) -> float:
         """
