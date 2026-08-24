@@ -1,0 +1,509 @@
+bucket_definitions:
+
+  News & Politics:
+    - name: news
+      description: >
+        A news or journalism post from a news outlet: reported headlines,
+        breaking-news coverage, press photography, news articles, and
+        journalistic infographics. Professionally produced news and political
+        reporting.
+
+  Fashion:
+    - name: fashion
+      description: >
+        A fashion post: outfits and styling, clothing and streetwear, designer and
+        runway looks, accessories, lookbooks, and fashion shoots. The image centers
+        on what someone is wearing.
+
+  Fitness:
+    - name: fitness
+      description: >
+        A fitness post: workout and exercise videos, gym and weight training,
+        running and cycling, fitness demonstrations and form, athletic physiques
+        and body transformations, people working out. The image shows exercise
+        or training.
+
+  Food:
+    - name: food
+      description: >
+        A food post: dishes, recipes, cooking and baking, restaurant meals,
+        food photography, drinks and dining — the image centers on food itself.
+
+  Pets and Animals:
+    - name: pets_and_animals
+      description: >
+        A pet or animal post: dogs, cats and other pets, wildlife and nature,
+        animal rescue and care, zoo and aquarium animals, and cute or funny animal
+        clips. The image centers on an animal.
+
+  Art:
+    - name: art
+      description: >
+        An art post: paintings, drawings and illustration, digital art, sculpture,
+        street art and murals, art process and technique, and gallery or exhibition
+        works. The image shows an artwork or its making.
+
+  Business and Finance:
+    - name: business_finance
+      description: >
+        A business or finance post: stock and crypto charts, trading screens,
+        market data and financial graphs, money and investing, entrepreneurship
+        and startups, real estate, and personal finance. The image centers on
+        markets, money, or business.
+
+  Entertainment:
+    - name: entertainment
+      description: >
+        A meme, joke, or entertainment post: image macros, captioned screenshots,
+        text-overlay statements, reaction images, satire, comedy, viral clips,
+        celebrities, TV, movies, music, gaming, and sports highlights. Casual,
+        humorous, shareable content.
+
+  Automotive:
+    - name: automotive
+      description: >
+        An automotive post: cars and motorcycles, new models and reviews, car
+        culture and modifications, electric vehicles, motorsport racing, and
+        vehicle photography. The image centers on a vehicle.
+
+  Travel:
+    - name: travel
+      description: >
+        A travel post: trip and vacation photos, destination and city guides,
+        travel vlogs, tourism, hotels and itineraries — content about a traveler's
+        journey and the places they visit.
+
+  Family:
+    - name: family
+      description: >
+        A family or parenting post: parenting and kids, family activities and
+        vlogs, pregnancy and child development, and home and family life. The image
+        shows family or children.
+
+  #----------------------------------------------------------------------------------------#
+
+  Travel:
+    - name: travel
+      description: >
+        A travel post: trip and vacation photos, destination and city guides,
+        travel vlogs, tourism, hotels and itineraries — content about a traveler's
+        journey and the places they visit.
+    - name: food
+      description: >
+        A food post: dishes, recipes, cooking and baking, restaurant meals,
+        food photography, drinks and dining — the image centers on food itself.
+    - name: entertainment
+      description: >
+        A meme, joke, or entertainment post: image macros, captioned
+        screenshots, text-overlay statements, reaction images, satire, comedy,
+        viral clips, celebrities, TV, movies, music, and gaming. Casual,
+        humorous, shareable content.
+
+  BandF_Fit:
+    - name: business_finance
+      description: >
+        A business or finance post: stock and crypto charts, trading screens,
+        market data and financial graphs, money and investing, entrepreneurship
+        and startups, real estate, and personal finance. The image centers on
+        markets, money, or business.
+    - name: fitness
+      description: >
+        A fitness post: workout and exercise videos, gym and weight training,
+        running and cycling, fitness demonstrations and form, athletic physiques
+        and body transformations, people working out. The image shows exercise
+        or training.
+    - name: entertainment
+      description: >
+        A meme, joke, or entertainment post: image macros, captioned
+        screenshots, text-overlay statements, reaction images, satire, comedy,
+        viral clips, celebrities, TV, movies, music, and gaming. Casual,
+        humorous, shareable content.
+
+  BandF:
+    - name: business_finance
+      description: >
+        A business or finance post: stock and crypto charts, trading screens,
+        market data and financial graphs, money and investing, entrepreneurship
+        and startups, real estate, and personal finance. The image centers on
+        markets, money, or business.
+    - name: food
+      description: >
+        A food post: dishes, recipes, cooking and baking, restaurant meals,
+        food photography, drinks and dining — the image centers on food itself.
+    - name: entertainment
+      description: >
+        A meme, joke, or entertainment post: image macros, captioned
+        screenshots, text-overlay statements, reaction images, satire, comedy,
+        viral clips, celebrities, TV, movies, music, and gaming. Casual,
+        humorous, shareable content.
+
+  Fit:
+    - name: fitness
+      description: >
+        A fitness post: workout and exercise videos, gym and weight training,
+        running and cycling, fitness demonstrations and form, athletic physiques
+        and body transformations, people working out. The image shows exercise
+        or training.
+    - name: food
+      description: >
+        A food post: dishes, recipes, cooking and baking, restaurant meals,
+        food photography, drinks and dining — the image centers on food itself.
+    - name: entertainment
+      description: >
+        A meme, joke, or entertainment post: image macros, captioned
+        screenshots, text-overlay statements, reaction images, satire, comedy,
+        viral clips, celebrities, TV, movies, music, and gaming. Casual,
+        humorous, shareable content.
+
+  NewsC:
+    - name: news
+      description: >
+        A news or journalism post from a news outlet: reported headlines,
+        breaking-news coverage, press photography, news articles, and
+        journalistic infographics. Professionally produced news reporting.
+    - name: food
+      description: >
+        A food post: dishes, recipes, cooking and baking, restaurant meals,
+        food photography, drinks and dining — the image centers on food itself.
+    - name: entertainment
+      description: >
+        A meme, joke, or entertainment post: image macros, captioned
+        screenshots, text-overlay statements, reaction images, satire, comedy,
+        viral clips, celebrities, TV, movies, music, and gaming. Casual,
+        humorous, shareable content.
+
+  NewsCR:
+    - name: news
+      description: >
+        A news or journalism post from a news outlet: reported headlines,
+        breaking-news coverage, press photography, news articles, and
+        journalistic infographics. Professionally produced news reporting.
+    - name: food
+      description: >
+        A food post: dishes, recipes, cooking and baking, restaurant meals,
+        food photography, drinks and dining — the image centers on food itself.
+    - name: entertainment
+      description: >
+        A meme, joke, or entertainment post: image macros, captioned
+        screenshots, text-overlay statements, reaction images, satire, comedy,
+        viral clips, celebrities, TV, movies, music, and gaming. Casual,
+        humorous, shareable content.
+
+interaction_policy:
+  tau_like:   0.5      # PLACEHOLDER — set from calibrate_thresholds.py
+  tau_dwell:  0.5      #     "
+  tau_follow: 0.5      #     "
+  off_bucket_like_prob: 0.01   # human like-noise on off-interest posts (must be > 0)
+  high_band_like_prob:  0.4  # p(like | HIGH tier), spent against the budget
+  dwell_multiplier: [2.0, 4.0] # long-dwell range for MEDIUM/HIGH
+  likes_session_cap:   7       # p90 likes/session [CSV] — hard ceiling
+  likes_week_cap:      14      # binding weekly budget, ~2x median [DERIVED]
+  session_like_target: 3       # ~2x p75; sampled per active session
+  active_session_prob: 0.6     # ~40% of sessions like nothing [CSV median ~ 0]
+  follow_week_budget:  2       # [VAULT] budget-not-probability
+  follow_day_cap:      1
+  carousel_depth_medium: 3     # slides for MEDIUM (HIGH = all, BASELINE = cover only)
+
+research_profiles:
+
+  - id: profile_de_01
+    email: ___
+    firefox_profile: ___
+    screen: [1280,1024] 
+    window: [500,926]
+    role: probe
+    condition: no_interaction
+    bucket: Manosphere
+
+  - id: probe01
+    email: ___
+    firefox_profile: ___
+    screen: [1440, 900]
+    window: [500, 926]
+    role: probe
+    condition: no_interaction
+    bucket: News & Politics
+
+  - id: probe03
+    email: ___
+    firefox_profile: ___
+    screen: [1440, 900]
+    window: [500, 926]
+    role: probe
+    condition: no_interaction
+    bucket: Fitness
+
+  - id: probe04
+    email: ___
+    firefox_profile: ___
+    screen: [1280,1024] 
+    window: [500,926]
+    role: probe
+    condition: no_interaction
+    bucket: Food
+
+  - id: probe008
+    email: ___
+    firefox_profile: ___
+    screen: [1440, 900]
+    window: [500, 926]
+     role: probe
+    condition: no_interaction
+    bucket: Business and Finance
+
+  - id: probe09
+    email: ___
+    firefox_profile: ___
+    screen: [1440, 900]
+    window: [500, 926]
+    role: probe
+    condition: no_interaction
+    bucket: Entertainment
+
+  # Warning
+  - id: probe11
+    email: ___
+    firefox_profile: ___
+    screen: [1280,1024] 
+    window: [500,926]
+    role: probe
+    condition: no_interaction
+    bucket: Travel
+
+
+  # Business and Fitness ----------#
+
+  - id: C_MI_W1_BandF_Fit
+    email: ___
+    firefox_profile: ___
+    screen: [1920, 1080]
+    window: [1920,1080]
+    role: study
+    gender: M
+    condition: interaction  
+    follow_suggested: true        
+    assigned_interests: [Business and Finance, Fitness, Entertainment]
+    bucket: BandF_Fit
+
+  - id: U_FI_W1_BandF_Fit
+    email: ___
+    firefox_profile: ___
+    screen: [1440, 900]
+    window: [500, 926]
+    role: study
+    gender: F
+    condition: interaction  
+    follow_suggested: true    
+    assigned_interests: [Business and Finance, Fitness, Entertainment]
+    bucket: BandF_Fit
+
+  - id: U_MN2_W1_BandF_Fit
+    email: ___
+    firefox_profile: ___
+    screen: [1536, 864]
+    window: [1536, 864]
+    role: study
+    gender: M
+    condition: no_interaction
+    assigned_interests: [Business and Finance, Fitness, Entertainment]
+    bucket: BandF_Fit
+
+
+
+  # ---- Business ---
+
+  - id: U_MI2_W1_BandF
+    email: ___
+    firefox_profile: ___
+    screen: [1536, 864]
+    window: [1536, 864]
+    role: study
+    gender: M
+    condition: interaction  
+    follow_suggested: true    
+    assigned_interests: [Business and Finance, Food, Entertainment]
+    bucket: BandF
+
+  - id: U_FI2_W1_BandF
+    email: ___
+    firefox_profile: ___
+    screen: [1280,1024] 
+    window: [500,926]
+    role: study
+    gender: F
+    condition: interaction  
+    follow_suggested: true    
+    assigned_interests: [Business and Finance, Food, Entertainment]
+    bucket: BandF
+
+  - id: U_MN_W1_BandF
+    email: ___
+    firefox_profile: ___
+    screen: [1280,1024] 
+    window: [500,926]
+    role: study
+    gender: M
+    condition: no_interaction  
+    assigned_interests: [Business and Finance, Food, Entertainment]
+    bucket: BandF
+
+
+  # ---- Fitness ---
+
+  - id: U_MI_W1_Fit
+    email: ___
+    firefox_profile: ___
+    screen: [1280,1024] 
+    window: [500,926]
+    role: study
+    gender: M
+    condition: interaction  
+    follow_suggested: true    
+    assigned_interests: [Fitness, Food, Entertainment]
+    bucket: Fit
+
+  - id: U_FI_W1_Fit
+    email: ___
+    firefox_profile:___
+    screen: [1280,1024] 
+    window: [500,926]
+    role: study
+    gender: F
+    condition: interaction  
+    follow_suggested: true    
+    assigned_interests: [Fitness, Food, Entertainment]
+    bucket: Fit
+
+  - id: U_MN_W1_Fit
+    email: ___
+    firefox_profile: ___
+    screen: [1440, 900]
+    window: [500, 926]
+    role: study
+    gender: M
+    condition: no_interaction
+    assigned_interests: [Fitness, Food, Entertainment]
+    bucket: Fit
+
+
+  # --- Travel ---
+
+  - id: U_MI2_W1_Con
+    email: ___
+    firefox_profile: ___
+    screen: [1366, 768]
+    window: [1366, 768] 
+    role: study
+    gender: M
+    condition: interaction  
+    follow_suggested: true    
+    assigned_interests: [Travel, Food, Entertainment]
+    bucket: Travel
+
+  - id: U_FI_W1_Con
+    email: ___
+    firefox_profile: ___
+    screen: [1536, 864]
+    window: [430, 900]
+    role: study
+    gender: F
+    condition: interaction  
+    follow_suggested: true    
+    assigned_interests: [Travel, Food, Entertainment]
+    bucket: Travel
+
+  - id: C_MN2_W1_Con
+    email: ___
+    firefox_profile: ___
+    screen: [1536, 864]
+    window: [430, 900]
+    role: study
+    gender: M
+    condition: no_interaction
+    assigned_interests: [Travel, Food, Entertainment]
+    bucket: Travel
+
+
+  # --- NewsC ---
+
+  - id: U_MI_W1_NewsC
+    email: ___
+    firefox_profile: ___
+    screen: [1280,1024] 
+    window: [500,926]
+    role: study
+    gender: M
+    condition: interaction  
+    follow_suggested: true    
+    assigned_interests: [NewsC, Food, Entertainment]
+    bucket: NewsC
+
+  - id: C_FI2_W1_NewsC
+    email: ___
+    firefox_profile: ___
+    screen: [1920, 1080]
+    window: [1920,1080]
+    role: study
+    gender: F
+    condition: interaction  
+    follow_suggested: true    
+    assigned_interests: [NewsC, Food, Entertainment]
+    bucket: NewsC
+
+  - id: U_MN_W1_NewsC
+    email: ___
+    firefox_profile: ___
+    screen: [1280,1024] 
+    window: [500,926]
+    role: study
+    gender: M
+    condition: no_interaction  
+    assigned_interests: [NewsC, Food, Entertainment]
+    bucket: NewsC
+
+  # --- NewsCR ---
+
+  - id: U_MI_W1_NewsCR
+    email: ___
+    firefox_profile: ___
+    screen: [1440, 900]
+    window: [500, 926]
+    role: study
+    gender: M
+    condition: interaction  
+    follow_suggested: true    
+    assigned_interests: [NewsCR, Food, Entertainment]
+    bucket: NewsCR
+
+  - id: U_FI2_W1_NewsCR
+    email: ___
+    firefox_profile: ___
+    screen: [1366, 768]
+    window: [1366, 768]
+    role: study
+    gender: F
+    condition: interaction  
+    follow_suggested: true      
+    assigned_interests: [NewsCR, Food, Entertainment]
+    bucket: NewsCR
+
+  - id: U_MN_W1_NewsCR
+    email: ___
+    firefox_profile: ___
+    screen: [1536, 864]
+    window: [430, 900]
+    role: study
+    gender: M
+    condition: no_interaction
+    assigned_interests: [NewsCR, Food, Entertainment]
+    bucket: NewsCR
+
+collection_settings:
+  posts_per_session: 35
+  scroll_delay_range: [1.0, 3.0]
+  session_cooldown: 300
+
+monitoring:
+  health_check_interval: 30
+  proxy_timeout: 10
+  error_threshold: 5
