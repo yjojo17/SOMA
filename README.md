@@ -174,4 +174,10 @@ Publish aggregates and classification results, not the underlying corpus.
 
 ## License
 
-GNU Affero General Public License v3.0 or later. See [LICENSE](LICENSE).
+License
+
+GNU General Public License v3.0 or later. See LICENSE.
+
+Anyone who distributes this software, modified or not, must pass on the same
+freedoms and provide the corresponding source under the same terms. 
+Copyright remains with the author.
