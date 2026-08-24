@@ -20,35 +20,12 @@ CREATE TABLE accounts (
     bucket              TEXT,                            -- probes: their single bucket; study: NULL
     assigned_interests  TEXT[],                          -- study: 2–3 bucket names; probes: NULL
     gender              account_gender,                  -- study: M/F (independent variable); probes: NULL
-    status              account_status NOT NULL DEFAULT 'active',
+    status              account_status NOT NULL DEFAULT 'active',   -- can be removed dont think it used
     created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     CHECK (
         (role = 'probe' AND bucket IS NOT NULL AND assigned_interests IS NULL AND gender IS NULL) OR
         (role = 'study' AND bucket IS NULL AND assigned_interests IS NOT NULL AND gender IS NOT NULL)
     )
-);
-
--- -------------------------------------------------------------------
--- experiments
--- An A/B run. Probes are NOT in any experiment (NULL FK on posts/interactions).
--- -------------------------------------------------------------------
-CREATE TYPE experiment_status AS ENUM ('planned', 'running', 'completed', 'aborted');
-
-CREATE TABLE experiments (
-    id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    name         TEXT NOT NULL UNIQUE,
-    description  TEXT,
-    config       JSONB,
-    started_at   TIMESTAMPTZ,
-    ended_at     TIMESTAMPTZ,
-    status       experiment_status NOT NULL DEFAULT 'planned'
-);
-
-CREATE TABLE experiment_accounts (
-    experiment_id  UUID NOT NULL REFERENCES experiments(id) ON DELETE CASCADE,
-    account_id     TEXT NOT NULL REFERENCES accounts(id),
-    config         JSONB,
-    PRIMARY KEY (experiment_id, account_id)
 );
 
 -- -------------------------------------------------------------------
@@ -61,7 +38,6 @@ CREATE TYPE session_status AS ENUM ('running', 'completed', 'errored');
 CREATE TABLE sessions (
     id                TEXT PRIMARY KEY,                  -- e.g. 'probe_01_20260417_143022'
     account_id        TEXT NOT NULL REFERENCES accounts(id),
-    experiment_id     UUID REFERENCES experiments(id),   -- NULL for probes
     started_at        TIMESTAMPTZ NOT NULL,
     ended_at          TIMESTAMPTZ,
     planned_duration  INTERVAL,
@@ -72,8 +48,6 @@ CREATE TABLE sessions (
 );
 
 CREATE INDEX idx_sessions_account_time ON sessions (account_id, started_at DESC);
-CREATE INDEX idx_sessions_experiment ON sessions (experiment_id) WHERE experiment_id IS NOT NULL;
-
 -- -------------------------------------------------------------------
 -- posts  (hypertable)
 -- One row per (account, post, observation-time). If probe_02 sees post X twice, two rows.
@@ -83,7 +57,6 @@ CREATE TABLE posts (
     id              BIGSERIAL,
     collected_at    TIMESTAMPTZ NOT NULL,
     account_id      TEXT NOT NULL REFERENCES accounts(id),
-    experiment_id   UUID REFERENCES experiments(id),
     session_id      TEXT NOT NULL REFERENCES sessions(id),
     feed_position   INT NOT NULL,
     post_pk         TEXT NOT NULL,                       -- Instagram media pk/id
@@ -96,6 +69,8 @@ CREATE TABLE posts (
     is_following    BOOLEAN NOT NULL,
     clip_score      REAL,                                -- NULL until CLIP calibration/scoring
     clip_aligned    BOOLEAN,                             -- derived from clip_score + threshold
+    clip_top_bucket TEXT,                                -- argmax CLIP category for the post
+    vlm_scores      JSONB,                               -- full per-category softmax distribution
     post_data       JSONB NOT NULL,                      -- full parsed media object (everything else)
     PRIMARY KEY (id, collected_at)
 );
@@ -106,7 +81,6 @@ CREATE INDEX idx_posts_account_time ON posts (account_id, collected_at DESC);
 CREATE INDEX idx_posts_post_pk ON posts (post_pk);
 CREATE INDEX idx_posts_suggested ON posts (is_suggested, collected_at DESC);
 CREATE INDEX idx_posts_session ON posts (session_id);
-CREATE INDEX idx_posts_experiment ON posts (experiment_id, collected_at DESC) WHERE experiment_id IS NOT NULL;
 
 -- -------------------------------------------------------------------
 -- interactions  (hypertable)
@@ -119,7 +93,6 @@ CREATE TABLE interactions (
     id                   BIGSERIAL,
     occurred_at          TIMESTAMPTZ NOT NULL,
     account_id           TEXT NOT NULL REFERENCES accounts(id),
-    experiment_id        UUID REFERENCES experiments(id),
     session_id           TEXT NOT NULL REFERENCES sessions(id),
     interaction_type     TEXT NOT NULL,
     post_observation_id  BIGINT,                         -- FK into posts.id; NULL for session_start, mouse_move, etc.

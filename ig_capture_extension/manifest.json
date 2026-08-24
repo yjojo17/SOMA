@@ -1,0 +1,27 @@
+{
+  "manifest_version": 2,
+  "name": "IG Feed Capture (research)",
+  "version": "1.0",
+  "description": "Captures Instagram feed/GraphQL API response bodies in-browser for research collection.",
+  "permissions": [
+    "webRequest",
+    "webRequestBlocking",
+    "*://*.instagram.com/*"
+  ],
+  "background": {
+    "scripts": ["background.js"]
+  },
+  "content_scripts": [
+    {
+      "matches": ["*://*.instagram.com/*"],
+      "js": ["content.js"],
+      "run_at": "document_start",
+      "all_frames": false
+    }
+  ],
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "ig-capture@research.local"
+    }
+  }
+}

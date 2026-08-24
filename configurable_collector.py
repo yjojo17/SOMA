@@ -8,12 +8,14 @@ import random
 import logging
 import json
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional, Dict, List
 import yaml
+import subprocess
 
 from pyvirtualdisplay import Display
-from selenium import webdriver
+#from selenium import webdriver
+from undetected_geckodriver import Firefox
 from selenium.webdriver.firefox.service import Service
 from selenium.webdriver.firefox.options import Options
 from selenium.webdriver.common.by import By
@@ -21,14 +23,15 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import StaleElementReferenceException
 from selenium.webdriver.common.action_chains import ActionChains
-from seleniumwire import webdriver as wire_webdriver
 
-from seleniumwire_interceptor import SeleniumWireInterceptor
+from extension_interceptor import ExtensionInterceptor
+from capture_addon import install_capture_extension
 from human_behavior import HumanBehavior
 from action_logger import ActionLogger
 from db.database_manager import DatabaseManager
 from db.raw_archive import RawArchive
 from monitoring.metrics_pusher import MetricsPusher
+from clip_classifier import CLIPClassificationService
 
 
 class ConfigurableNetworkCollector:
@@ -41,11 +44,7 @@ class ConfigurableNetworkCollector:
         self.config = self._load_config()
         self.profile_config = self._get_profile_config(profile_id)
 
-        self.passive_mode = self.config['collection_settings'].get('passive_mode', False)
-        self.do_interact = (
-            self.profile_config.get('condition') == 'interaction'
-            and not self.passive_mode
-        )
+        self.do_interact = self.profile_config.get('condition') == 'interaction'
 
         self.logger = self._setup_logging()
 
@@ -58,7 +57,7 @@ class ConfigurableNetworkCollector:
         self.session_id: Optional[str] = None
         self.db: Optional[DatabaseManager] = None
         self.archive: Optional[RawArchive] = None
-        self.interceptor: Optional[SeleniumWireInterceptor] = None
+        self.interceptor: Optional[ExtensionInterceptor] = None
         self.pusher: Optional[MetricsPusher] = None
 
         self.current_scroll_position = 0
@@ -66,9 +65,33 @@ class ConfigurableNetworkCollector:
         self.followed_accounts = set()
         self.attempted_like_posts = set()
         self.attempted_follow_posts = set()
-        self.processed_posts = set()  # posts that have been fully dwelt on
-        self.video_watch_pct = self.config['collection_settings'].get('video_watch_percentage', 0.1)
-        self.passive_mode = self.config['collection_settings'].get('passive_mode', False)
+        self.processed_posts = set()
+        # CLIP-aligned watch time: off during WarmUp, set true for the interaction
+        # phase so dwell length tracks whether a post is on-target.
+        self.clip_aligned_watch = self.config['collection_settings'].get('clip_aligned_watch', False)
+        # Minimum calibrated probability for the target bucket before a post counts
+        # as on-target (gates likes and clip-aligned watch). Softmax runs over the
+        # full category set
+        p = self.config.get('interaction_policy', {})
+        self.policy        = p
+        self.tau_like      = p.get('tau_like',   1.01)   # 1.01 = unreachable: no likes if unset
+        self.tau_dwell     = p.get('tau_dwell',  1.01)
+        self.tau_follow    = p.get('tau_follow', 1.01)
+        self.like_budget     = 0   # set per session in collect_feed()
+        self.follow_budget   = 0
+        self.follow_day_left = 0
+
+        # CLIP service: looks up bucket definitions by the profile's bucket key.
+        seen = {}
+        for entries in self.config.get('bucket_definitions', {}).values():
+            for b in entries:
+                seen.setdefault(b['name'], b)
+        all_categories = list(seen.values())
+        self.vlm_service = CLIPClassificationService(all_categories) if all_categories else None  # full set — unchanged
+
+        bucket_cats = self.config.get('bucket_definitions', {}).get(self.profile_config.get('bucket', ''), [])
+        self._target_names = [b['name'] for b in bucket_cats if not b.get('neutral', False)]
+
 
     def _load_config(self) -> Dict:
         with open(self.config_file, 'r') as f:
@@ -105,7 +128,6 @@ class ConfigurableNetworkCollector:
             position = self.driver.execute_script(
                 "return arguments[0].getBoundingClientRect();", article
             )
-
             if 0 <= position['top'] <= (viewport_height * 0.5):
                 network_posts = self.interceptor.get_posts()
                 if index < len(network_posts):
@@ -113,29 +135,51 @@ class ConfigurableNetworkCollector:
         return None
 
     def _get_post_link_from_article(self, article) -> Optional[str]:
-        """Extracts the canonical post URL from a DOM article element."""
         try:
             link_elem = article.find_element(By.XPATH, ".//a[contains(@href, '/p/') or contains(@href, '/reel/')]")
-            return link_elem.get_attribute('href').split('?')[0]
+            href = link_elem.get_attribute('href').split('?')[0]
+            parts = [p for p in href.split('/') if p]
+            if parts[-1] in ('liked_by', 'comments', 'share'):
+                return None
+            return href
         except Exception:
             return None
 
+    def _shortcode(self, url: str) -> str:
+        parts = [p for p in url.split('?')[0].split('/') if p]
+        for marker in ('p', 'reel'):
+            if marker in parts and parts.index(marker) + 1 < len(parts):
+                return parts[parts.index(marker) + 1]
+        return url
+
     def update_context(self):
-        """Returns the centered article element, or None if no match."""
+        """Returns the centered article element, or None if no match.
+
+        Also submits any newly captured posts to CLIP so inference starts
+        as early as possible — results checked later in _vlm_fits().
+        """
         self.interceptor.process_requests(self.driver)
         captured_posts = self.interceptor.get_posts()
+
+        if self.vlm_service:
+            for post_data in captured_posts:
+                self.vlm_service.submit(post_data)
 
         articles = self.driver.find_elements(By.TAG_NAME, 'article')
         viewport_h = self.driver.execute_script("return window.innerHeight;")
         center = viewport_h / 2
 
         for i, article in enumerate(articles):
-            rect = self.driver.execute_script("return arguments[0].getBoundingClientRect();", article)
+            try:
+                rect = self.driver.execute_script("return arguments[0].getBoundingClientRect();", article)
+            except StaleElementReferenceException:
+                continue
             if rect['top'] < center < rect['bottom']:
                 link = self._get_post_link_from_article(article)
                 if link:
+                    link_code = self._shortcode(link)
                     for post_data in captured_posts:
-                        if post_data.get('postLink') == link:
+                        if self._shortcode(post_data.get('post_link', '')) == link_code:
                             self.action_logger.set_active_post(post_data)
                             self.current_post_data = post_data
                             return article
@@ -151,6 +195,66 @@ class ConfigurableNetworkCollector:
         self.current_post_data = None
         return None
 
+    def _activation(self, post_link: str) -> float:
+        """Max CLIP probability across the account's high-interest categories.
+        Synchronous: classifies the centered post now (cached), so the live like/
+        follow decision never races the async queue."""
+        if not self.vlm_service or not self.current_post_data or not self._target_names:
+            return 0.0
+        result = self.vlm_service.classify_sync(self.current_post_data)
+        if not result:
+            return 0.0
+        a = result.best_target_score(self._target_names)
+        self.logger.info(f"CLIP {post_link.split('/')[-2]} — top: {result.top_bucket} a={a:.3f}")
+        return a
+
+    def _engagement_tier(self, post_link: str) -> str:
+        """'high' -> like-eligible, 'medium' -> long dwell only, 'baseline' -> normal."""
+        a = self._activation(post_link)
+        if a >= self.tau_like:
+            return 'high'
+        if a >= self.tau_dwell:
+            return 'medium'
+        return 'baseline'
+
+    def _carousel_depth(self, post_link: str) -> int:
+        """Slides to click through, from CLIP. Cover is already classified; refine
+        with slide 2 / last when their URLs were captured (carousel_image_urls)."""
+        a = self._activation(post_link)
+        extra = (self.current_post_data or {}).get('carousel_image_urls', [])[1:]
+        if extra and self.vlm_service and self._target_names:
+            caption = (self.current_post_data or {}).get('caption', '') or ''
+            a = max([a] + [self.vlm_service.activation(u, self._target_names, caption) for u in extra])
+        if a >= self.tau_like:
+            return 99                                            # all slides
+        if a >= self.tau_dwell:
+            return self.policy.get('carousel_depth_medium', 3)   # a few
+        return 1                                                 # cover only
+
+    def _maybe_like(self, article, post_link: str, tier: str) -> None:
+        """The single like path: budget + attempted + per-tier probability gate.
+        MEDIUM never likes (dwell-only); HIGH and BASELINE fire at their own rates."""
+        if not self.do_interact or self.like_budget <= 0 or post_link in self.attempted_like_posts:
+            return
+        if tier == 'high':
+            p_fire = self.policy.get('high_band_like_prob', 0.0)
+        elif tier == 'baseline':
+            p_fire = self.policy.get('off_bucket_like_prob', 0.0)
+        else:
+            return
+        if random.random() >= p_fire:
+            return
+        self.attempted_like_posts.add(post_link)
+        if self.perform_like_action(article):
+            self.like_budget -= 1
+            time.sleep(random.uniform(1.5, 3.0))
+
+    def _watch_target(self, post_link: str) -> float:
+        """Video watch fraction for this post. Passes the clip result only when
+        clip_aligned_watch is on, so WarmUp stays content-agnostic."""
+        fits = (self._engagement_tier(post_link) in ('high', 'medium')) if self.clip_aligned_watch else None
+        return self.human_behavior.video_watch_fraction(fits)
+
     def _is_carousel_article(self, article) -> bool:
         """Returns True if the article is a multi-slide carousel.
 
@@ -160,48 +264,53 @@ class ConfigurableNetworkCollector:
         causing _wait_for_video_progress to poll a hidden, non-playing video and hit the
         full 60s timeout.
         """
-        return self.driver.execute_script("""
-            return arguments[0].querySelector('[aria-label="Next"]') !== null
-                || arguments[0].querySelector('[aria-label="Nächstes"]') !== null
-                || arguments[0].querySelector('[aria-label="Weiter"]') !== null;
-        """, article)
+        try:
+            return self.driver.execute_script("""
+                return arguments[0].querySelector('[aria-label="Next"]') !== null
+                    || arguments[0].querySelector('[aria-label="Nächstes"]') !== null
+                    || arguments[0].querySelector('[aria-label="Weiter"]') !== null;
+            """, article)
+        except StaleElementReferenceException:
+            return False
 
-    def _handle_carousel(self, article):
-        """Clicks through all carousel slides, dwelling on each.
-
-        Handles each slide individually so _is_video_article only runs on the
-        currently visible slide — ensuring video progress polling targets a
-        playing video, not a hidden preloaded one.
-        """
+    def _handle_carousel(self, article, post_link: str, max_slides: int = 99):
+        """Clicks through carousel slides, dwelling on each. Stops gracefully if the
+        article goes stale (IG re-renders the feed during long video waits)."""
         slide_num = 0
-        while True:
-            is_video = self._is_video_article(article)
-            self.logger.info(f"Carousel slide {slide_num}: {'video' if is_video else 'image'}")
-            if is_video:
-                self._wait_for_video_progress(article, self.video_watch_pct)
-            else:
-                time.sleep(random.uniform(1.5, 3.5))
+        try:
+            while True:
+                is_video = self._is_video_article(article)
+                self.logger.info(f"Carousel slide {slide_num}: {'video' if is_video else 'image'}")
+                if is_video:
+                    self._wait_for_video_progress(article, self._watch_target(post_link))
+                else:
+                    time.sleep(random.uniform(1.5, 3.5))
 
-            next_btn = self.driver.execute_script("""
-                return arguments[0].querySelector('[aria-label="Next"]')
-                    || arguments[0].querySelector('[aria-label="Nächstes"]')
-                    || arguments[0].querySelector('[aria-label="Weiter"]');
-            """, article)
-            if next_btn is None:
-                break
+                if slide_num + 1 >= max_slides:
+                    break
 
-            self.driver.execute_script("arguments[0].click();", next_btn)
-            time.sleep(random.uniform(2.0, 3.5))
-            self.driver.execute_script("""
-                var videos = arguments[0].querySelectorAll('video');
-                for (var v of videos) {
-                    if (v.offsetWidth > 0 && v.offsetHeight > 0 && v.paused) {
-                        v.play();
-                        break;
+                next_btn = self.driver.execute_script("""
+                    return arguments[0].querySelector('[aria-label="Next"]')
+                        || arguments[0].querySelector('[aria-label="Nächstes"]')
+                        || arguments[0].querySelector('[aria-label="Weiter"]');
+                """, article)
+                if next_btn is None:
+                    break
+
+                self.driver.execute_script("arguments[0].click();", next_btn)
+                time.sleep(random.uniform(2.0, 3.5))
+                self.driver.execute_script("""
+                    var videos = arguments[0].querySelectorAll('video');
+                    for (var v of videos) {
+                        if (v.offsetWidth > 0 && v.offsetHeight > 0 && v.paused) {
+                            v.play();
+                            break;
+                        }
                     }
-                }
-            """, article)
-            slide_num += 1
+                """, article)
+                slide_num += 1
+        except StaleElementReferenceException:
+            self.logger.warning(f"Carousel went stale at slide {slide_num} — moving on")
 
         self.action_logger.log_action('carousel_viewed', {'slides_viewed': slide_num + 1})
 
@@ -212,38 +321,35 @@ class ConfigurableNetworkCollector:
         but hidden <video> elements that Instagram places in the DOM for all carousel
         slides simultaneously.
         """
-        return self.driver.execute_script("""
-            var videos = arguments[0].querySelectorAll('video');
-            for (var v of videos) {
-                if (v.offsetWidth > 0 && v.offsetHeight > 0) return true;
-            }
-            return false;
-        """, article)
-
-    def _wait_for_video_progress(self, article, target_pct: float, timeout: float = 60.0):
-        """Blocks until the currently visible video has been watched to target_pct, or timeout is hit."""
-        start = time.time()
-        while time.time() - start < timeout:
-            result = self.driver.execute_script("""
+        try:
+            return self.driver.execute_script("""
                 var videos = arguments[0].querySelectorAll('video');
                 for (var v of videos) {
-                    if (v.offsetWidth > 0 && v.offsetHeight > 0 && v.duration) {
-                        return {currentTime: v.currentTime, duration: v.duration};
-                    }
+                    if (v.offsetWidth > 0 && v.offsetHeight > 0) return true;
                 }
-                return null;
+                return false;
             """, article)
-            if result and result['duration'] > 0:
-                progress = result['currentTime'] / result['duration']
-                if progress >= target_pct:
-                    self.action_logger.log_action('video_watched', {
-                        'progress_pct': round(progress * 100, 1),
-                        'target_pct': round(target_pct * 100, 1),
-                        'duration_s': round(result['duration'], 1),
-                    })
-                    return
-            time.sleep(0.5)
-            self.logger.debug("Video watch timeout reached before target percentage")
+        except StaleElementReferenceException:
+            return False
+
+    def _wait_for_video_progress(self, article, target_pct: float, timeout: float = 60.0):
+        """Blocks until the visible video reaches target_pct, or timeout. Returns
+        quietly if the element goes stale mid-watch."""
+        start = time.time()
+        while time.time() - start < timeout:
+            try:
+                result = self.driver.execute_script("""
+                    var videos = arguments[0].querySelectorAll('video');
+                    for (var v of videos) {
+                        if (v.offsetWidth > 0 && v.offsetHeight > 0 && v.duration) {
+                            return {currentTime: v.currentTime, duration: v.duration};
+                        }
+                    }
+                    return null;
+                """, article)
+            except StaleElementReferenceException:
+                self.logger.warning("Video element went stale mid-watch — moving on")
+                return
             if result and result['duration'] > 0:
                 progress = result['currentTime'] / result['duration']
                 if progress >= target_pct:
@@ -348,63 +454,75 @@ class ConfigurableNetworkCollector:
             self.logger.warning(f"Follow failed for {username}: {e}")
             return False
 
-    def initialize_browser(self):
+    def _clear_profile_lock(self, profile_path: str) -> None:
+        """Remove stale Firefox profile locks left by a crashed prior session — a held
+        lock is what triggers SessionNotCreatedException: 'Failed to set preferences'."""
+        for name in ('.parentlock', 'parent.lock', 'lock'):
+            lock = Path(profile_path) / name
+            try:
+                if lock.is_symlink() or lock.exists():
+                    lock.unlink()
+                    self.logger.info(f"Removed stale profile lock: {lock}")
+            except OSError as e:
+                self.logger.warning(f"Could not remove {lock}: {e}")
+
+    def _kill_stray_browser(self, profile_path: str) -> None:
+        """undetected_geckodriver's failed-init cleanup is broken — its quit() raises
+        before killing the Firefox it spawned, so a failed launch orphans a Firefox
+        still bound to this profile. A live holder (or a manual window left open) makes
+        every later launch fail with 'Failed to set preferences'. Kill it by profile path."""
+        try:
+            subprocess.run(['pkill', '-f', profile_path], check=False,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except FileNotFoundError:
+            self.logger.warning("pkill unavailable — cannot clear stray browser processes")
+            return
+        time.sleep(1.0)   # let the OS reap before relaunch
+
+    def initialize_browser(self, max_attempts: int = 3):
+        screen_w, screen_h = self.profile_config['screen']    # virtual monitor (Xvfb)
+        window_w, window_h = self.profile_config['window']    # browser window
+        firefox_profile = self.profile_config['firefox_profile']
+
         if self.use_virtual_display:
-            self.display = Display(visible=0, size=(800, 600))
+            self.display = Display(visible=0, size=(screen_w, screen_h))
             self.display.start()
             self.logger.info(f"Virtual display started for {self.profile_id}")
 
-        options = Options()
+        self._kill_stray_browser(firefox_profile)       
 
-        firefox_profile = self.profile_config['firefox_profile']
-        options.add_argument('-profile')
-        options.add_argument(firefox_profile)
+        for attempt in range(1, max_attempts + 1):
+            self._clear_profile_lock(firefox_profile)
 
-        user_agent = self.profile_config.get('user_agent',
-            'Mozilla/5.0 (iPhone; CPU iPhone OS 15_0 like Mac OS X) AppleWebKit/605.1.15')
-        options.set_preference("general.useragent.override", user_agent)
+            options = Options()
+            options.add_argument('-profile')
+            options.add_argument(firefox_profile)
+            try:
+                self.driver = Firefox(
+                    service=Service('/usr/local/bin/geckodriver'),
+                    options=options,
+                )
+                break
+            except Exception as e:
+                # undetected_geckodriver masks the real SessionNotCreatedException
+                # ("Failed to set preferences") with a TypeError from its own failed
+                # quit(); both mean the profile wouldn't open and both clear on retry.
+                self.logger.warning(
+                    f"Browser init attempt {attempt}/{max_attempts} for {self.profile_id} "
+                    f"failed (likely 'Failed to set preferences' — stale lock / transient): {e}"
+                )
+                self._kill_stray_browser(firefox_profile)       
+                if attempt == max_attempts:
+                    raise RuntimeError(
+                        f"Browser failed to start for {self.profile_id} after {max_attempts} attempts"
+                    ) from e
+                time.sleep(random.uniform(3.0, 6.0))
 
-        options.set_preference("layout.css.devPixelsPerPx", "1.0")
-        options.set_preference("layout.viewport.width", "390")
-        options.set_preference("layout.viewport.height", "844")
-
-        options.set_preference("dom.webdriver.enabled", False)
-        options.set_preference("useAutomationExtension", False)
-        options.set_preference("privacy.trackingprotection.enabled", False)
-        options.set_preference("network.http.referer.spoofSource", True)
-
-        options.set_preference("permissions.default.image", 1)
-        options.set_preference("browser.display.show_image_placeholders", True)
-
-        seleniumwire_options = {
-            'disable_encoding': True
-        }
-
-        self.driver = wire_webdriver.Firefox(
-            service=Service('/usr/local/bin/geckodriver'),
-            options=options,
-            seleniumwire_options=seleniumwire_options
-        )
-
-        self.driver.set_window_size(500, 926)
-
-        self.driver.execute_script("""
-            Object.defineProperty(navigator, 'webdriver', {
-                get: () => undefined
-            });
-            Object.defineProperty(navigator, 'platform', {
-                get: () => 'iPhone'
-            });
-            Object.defineProperty(navigator, 'oscpu', {
-                get: () => undefined
-            });
-        """)
-
+        install_capture_extension(self.driver)
+        self.driver.set_window_size(window_w, window_h)
         self.logger.info(f"Browser initialized for {self.profile_id}")
 
     def collect_feed(self, target_posts: int = 50) -> List[Dict]:
-        # 1. Generate session id, open DB, register session, instantiate archive + interceptor + metrics pusher.
-        # Per decision: fail loudly if either the DB or Pushgateway is unreachable at session start.
         started_at = datetime.now()
         self.session_id = f"{self.profile_id}_{started_at.strftime('%Y%m%d_%H%M%S')}"
 
@@ -414,20 +532,22 @@ class ConfigurableNetworkCollector:
         self.pusher = MetricsPusher(account_id=self.profile_id, session_id=self.session_id)
         self.pusher.connect()
 
-        self.db.ensure_account(
-            account_id=self.profile_id,
-            email=self.profile_config['email'],
-            firefox_profile=self.profile_config['firefox_profile'],
-            role=self.profile_config['role'],          # 'study'
-            bucket=self.profile_config.get('bucket'),  # None for study
-            assigned_interests=self.profile_config.get('assigned_interests'),  # ['Control', 'Fit', 'BandF']
-            gender=self.profile_config.get('gender'),  # 'F' or 'M'
-            condition=self.profile_config.get('condition'),  # 'interaction' or 'no_interaction'
-        )
+        is_probe = self.profile_config.get('role') == 'probe'
 
+        self.db.ensure_account(
+            account_id         = self.profile_id,
+            email              = self.profile_config['email'],
+            firefox_profile    = self.profile_config['firefox_profile'],
+            role               = self.profile_config['role'],
+            bucket             = self.profile_config.get('bucket') if is_probe else None,
+            assigned_interests = None if is_probe else self.profile_config.get('assigned_interests'),
+            gender             = None if is_probe else self.profile_config.get('gender'),
+            condition          = self.profile_config.get('condition'),
+        )
+        
         self.action_logger = ActionLogger(self.profile_id, session_id=self.session_id)
         self.archive = RawArchive(self.profile_id, self.session_id)
-        self.interceptor = SeleniumWireInterceptor(archive=self.archive)
+        self.interceptor = ExtensionInterceptor(archive=self.archive)
 
         session_duration_minutes = self.human_behavior.realistic_session_duration()
         session_end_time = time.time() + (session_duration_minutes * 60)
@@ -439,6 +559,29 @@ class ConfigurableNetworkCollector:
             planned_duration_seconds=int(session_duration_minutes * 60),
             target_posts=target_posts,
         )
+
+        # Interaction budgets — read from the interactions table (single source of truth).
+        if self.do_interact:
+            week_ago  = started_at - timedelta(days=7)
+            day_start = started_at.replace(hour=0, minute=0, second=0, microsecond=0)
+            likes_wk   = self.db.count_interactions_since(self.profile_id, 'like',   week_ago)
+            follows_wk = self.db.count_interactions_since(self.profile_id, 'follow', week_ago)
+            follows_td = self.db.count_interactions_since(self.profile_id, 'follow', day_start)
+
+            remaining_week = max(0, self.policy.get('likes_week_cap', 0) - likes_wk)
+            if random.random() < self.policy.get('active_session_prob', 0.0) and remaining_week > 0:
+                self.like_budget = min(
+                    remaining_week,
+                    random.randint(1, self.policy.get('session_like_target', 1) + 1),
+                    self.policy.get('likes_session_cap', 0),
+                )
+            else:
+                self.like_budget = 0
+
+            self.follow_budget   = max(0, self.policy.get('follow_week_budget', 0) - follows_wk)
+            self.follow_day_left = max(0, self.policy.get('follow_day_cap', 0) - follows_td)
+            self.logger.info(f"Budgets — likes:{self.like_budget} "
+                             f"follows_wk_left:{self.follow_budget} follows_today_left:{self.follow_day_left}")
 
         self.action_logger.log_session_start({
             'target_posts': target_posts,
@@ -454,6 +597,11 @@ class ConfigurableNetworkCollector:
             self.driver.get('https://www.instagram.com/')
             WebDriverWait(self.driver, 10).until(EC.presence_of_element_located((By.TAG_NAME, 'article')))
 
+            # Set browser cookies on CLIP session so CDN downloads succeed
+            if self.vlm_service:
+                self.vlm_service.set_cookies(self.driver.get_cookies())
+                self.logger.info("CLIP cookies set")
+
             scroll_count = 0
             max_scrolls = 200
 
@@ -461,7 +609,7 @@ class ConfigurableNetworkCollector:
                 # 1. What is centered right now — before any scrolling
                 article = self.update_context()
                 post_link = (
-                    (self.current_post_data.get('postLink') if self.current_post_data else None)
+                    (self.current_post_data.get('post_link') if self.current_post_data else None)
                     or (self._get_post_link_from_article(article) if article else None)
                     or ''
                 )
@@ -469,49 +617,44 @@ class ConfigurableNetworkCollector:
                 dwell_start = time.time()
                 is_new_post = article is not None and post_link and post_link not in self.processed_posts
 
-                # 2. Dwell on whatever is centered — skip if already processed
+                # 2. Tier from CLIP (interaction arm only; passive accounts never block on CLIP here)
+                tier = self._engagement_tier(post_link) if (self.do_interact and is_new_post) else 'baseline'
+
+                # 2a. Dwell on whatever is centered — depth/duration set by tier
                 if article is None or post_link in self.processed_posts:
                     time.sleep(random.uniform(0.3, 0.7))
                 elif self._is_carousel_article(article):
                     if self.do_interact:
-                        self._handle_carousel(article)
+                        self._handle_carousel(article, post_link, self._carousel_depth(post_link))
                     else:
                         time.sleep(random.uniform(1.5, 3.5))
                     self.processed_posts.add(post_link)
-                    if self.human_behavior.should_like_post() and self.do_interact:
-                        if post_link not in self.attempted_like_posts:
-                            self.attempted_like_posts.add(post_link)
-                            liked = self.perform_like_action(article)
-                            if liked:
-                                time.sleep(random.uniform(1.5, 3.0))
                 elif self._is_video_article(article):
                     if self.do_interact:
-                        self._wait_for_video_progress(article, self.video_watch_pct)
+                        self._wait_for_video_progress(article, self._watch_target(post_link))
                     else:
                         time.sleep(random.uniform(2.0, 4.0))
                     self.processed_posts.add(post_link)
-                    if self.human_behavior.should_like_post() and self.do_interact  :
-                        if post_link not in self.attempted_like_posts:
-                            self.attempted_like_posts.add(post_link)
-                            liked = self.perform_like_action(article)
-                            if liked:
-                                time.sleep(random.uniform(1.5, 3.0))
                 else:
-                    if self.human_behavior.should_pause():
+                    if tier in ('high', 'medium'):
+                        base = self.human_behavior.content_dwell_time('image')
+                        dwell = self.human_behavior.long_dwell(base, *self.policy.get('dwell_multiplier', [2.0, 4.0]))
+                        self.action_logger.log_pause(duration=dwell)
+                        time.sleep(dwell)
+                    elif self.human_behavior.should_pause():
                         pause_duration = self.human_behavior.pause_duration()
                         self.action_logger.log_pause(duration=pause_duration)
                         time.sleep(pause_duration)
-                        if self.human_behavior.should_like_post() and self.do_interact:
-                            if post_link not in self.attempted_like_posts:
-                                self.attempted_like_posts.add(post_link)
-                                liked = self.perform_like_action(article)
-                                if liked:
-                                    time.sleep(random.uniform(1.5, 3.0))
                     self.processed_posts.add(post_link)
 
-                # 3. Follow suggested accounts — runs for any centered article regardless of type
-                if article is not None and self.profile_config.get('follow_suggested', False):
-                    self.logger.info("Trying to follow")
+                # 2b. Like decision — one routed path (budget + tier handled inside _maybe_like)
+                if is_new_post:
+                    self._maybe_like(article, post_link, tier)
+
+                # 3. Follow suggested accounts — CLIP-fit (tau_follow) + weekly/daily budget
+                if (article is not None and self.profile_config.get('follow_suggested', False)
+                        and self.follow_budget > 0 and self.follow_day_left > 0
+                        and self._activation(post_link) >= self.tau_follow):
                     is_suggested = (
                         (self.current_post_data is not None and self.current_post_data.get('is_suggested'))
                         or self._is_suggested_in_dom(article)
@@ -523,9 +666,11 @@ class ConfigurableNetworkCollector:
                             else self._get_username_from_dom(article)
                         )
                         if username and username not in self.followed_accounts:
-                            self.perform_follow_action(article, username)
+                            if self.perform_follow_action(article, username):
+                                self.follow_budget   -= 1
+                                self.follow_day_left -= 1
 
-                # Log total dwell time for newly processed posts (all types)
+                # Log total dwell time for newly processed posts
                 if is_new_post and post_link in self.processed_posts:
                     self.action_logger.log_action('post_view', {
                         'duration_s': round(time.time() - dwell_start, 2)
@@ -554,11 +699,10 @@ class ConfigurableNetworkCollector:
                 time.sleep(self.human_behavior.scroll_delay())
                 scroll_count += 1
 
-                # Strategic mid-session push every 10 scrolls so a mid-run crash
-                # still leaves observable metrics in Prometheus.
                 if scroll_count % 10 == 0:
                     self.pusher.push()
 
+            # ── Post-session: capture, classify, enrich ───────────────────────
             self.interceptor.process_requests(self.driver)
             network_posts = self.interceptor.get_posts()
 
@@ -567,27 +711,50 @@ class ConfigurableNetworkCollector:
                 posts_count=len(network_posts)
             )
 
+            # Submit any posts not yet queued (captured in the final process_requests
+            # call that runs after the scroll loop — these had no chance to be
+            # submitted via update_context during the session).
+            if self.vlm_service:
+                newly_submitted = 0
+                for post in network_posts:
+                    if post.get('post_link') not in self.vlm_service._pending:
+                        self.vlm_service.submit(post)
+                        newly_submitted += 1
+                if newly_submitted:
+                    self.logger.info(f"CLIP: submitted {newly_submitted} late-captured posts")
+
+            # Enrich posts and collect CLIP results.
+            # Since the thread pool is sequential (max_workers=1), by the time
+            # result(post_N) returns, post_N+1 has already started — so each
+            # subsequent call blocks for only ~one inference cycle, not the
+            # full remaining queue.
             for i, post in enumerate(network_posts):
-                post['profile_id'] = self.profile_id
-                post['profile_email'] = self.profile_config['email']
-                post['position'] = i + 1
-                post['collection_timestamp'] = datetime.now().isoformat()
+                post['account_id']    = self.profile_id
+                post['session_id']    = self.session_id
+                post['feed_position'] = i + 1
+                if self.vlm_service:
+                    clip_result = self.vlm_service.result(post.get('post_link', ''), timeout=15)
+                    if clip_result and self._target_names:
+                        post['clip_score']   = clip_result.best_target_score(self._target_names)
+                        post['clip_aligned'] = clip_result.top_bucket in self._target_names
+                    else:
+                        post['clip_score']   = None
+                        post['clip_aligned'] = None
+                    post['clip_top_bucket'] = clip_result.top_bucket if clip_result else None
+                    post['vlm_scores']      = clip_result.scores if clip_result else None
 
             self.logger.info(f"Collection complete: {len(network_posts)} posts")
 
             final_stats = {
-                'posts_collected': len(network_posts),
+                'posts_collected':  len(network_posts),
                 'scrolls_performed': scroll_count,
-                'target_reached': len(network_posts) >= target_posts,
-                'suggested_posts': sum(1 for p in network_posts if p.get('is_suggested', False)),
-                'followed_posts': sum(1 for p in network_posts if p.get('is_following', False)),
-                'followed_suggested': len(self.followed_accounts)
+                'target_reached':   len(network_posts) >= target_posts,
+                'suggested_posts':  sum(1 for p in network_posts if p.get('is_suggested', False)),
+                'followed_posts':   sum(1 for p in network_posts if p.get('is_following', False)),
+                'followed_suggested': len(self.followed_accounts),
             }
             self.action_logger.log_session_end(final_stats)
 
-            # Populate pusher with final counts. Counters were not incremented
-            # during the loop because posts_collected is only known post-hoc
-            # (interceptor deduplicates). This is the authoritative final count.
             self.pusher.record_posts_collected(final_stats['posts_collected'])
             self.pusher.record_posts_suggested(final_stats['suggested_posts'])
             self.pusher.record_posts_followed(final_stats['followed_posts'])
@@ -637,7 +804,6 @@ class ConfigurableNetworkCollector:
             final_stats=final_stats,
             raw_archive_path=archive_path,
         )
-        # Final metrics push — fails loudly per decision.
         if self.pusher:
             duration = (ended_at - self.action_logger.session_start).total_seconds()
             self.pusher.finalize(duration_seconds=duration, status=status)
@@ -662,7 +828,10 @@ class ConfigurableNetworkCollector:
         return str(filepath)
 
     def cleanup(self):
-        if self.driver:
+        if self.vlm_service:
+            self.vlm_service.shutdown()
+
+        if self.driver is not None:
             self.driver.quit()
             self.logger.info(f"Browser closed for {self.profile_id}")
 

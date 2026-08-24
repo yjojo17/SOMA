@@ -3,7 +3,7 @@ Instagram Network Interceptor for selenium-wire
 """
 import json
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, Dict, List
 import logging
 
@@ -87,7 +87,7 @@ class SeleniumWireInterceptor:
                 if media:
                     post_data = self._parse_media_object(media)
                     if post_data:
-                        post_link = post_data.get('postLink')
+                        post_link = post_data.get('post_link')
                         if post_link and post_link not in self.seen_post_links:
                             self.seen_post_links.add(post_link)
                             self.captured_posts.append(post_data)
@@ -114,7 +114,7 @@ class SeleniumWireInterceptor:
 
                     post_data = self._parse_media_object(media)
                     if post_data:
-                        post_link = post_data.get('postLink')
+                        post_link = post_data.get('post_link')
                         if post_link and post_link not in self.seen_post_links:
                             self.seen_post_links.add(post_link)
                             self.captured_posts.append(post_data)
@@ -126,7 +126,7 @@ class SeleniumWireInterceptor:
                 node = edge.get('node', {})
                 post_data = self._parse_media_object(node)
                 if post_data:
-                    post_link = post_data.get('postLink')
+                    post_link = post_data.get('post_link')
                     if post_link and post_link not in self.seen_post_links:
                         self.seen_post_links.add(post_link)
                         self.captured_posts.append(post_data)
@@ -140,52 +140,81 @@ class SeleniumWireInterceptor:
             for item in items:
                 post_data = self._parse_media_object(item)
                 if post_data:
-                    post_link = post_data.get('postLink')
+                    post_link = post_data.get('post_link')
                     if post_link and post_link not in self.seen_post_links:
                         self.seen_post_links.add(post_link)
                         self.captured_posts.append(post_data)
         except Exception as e:
             self.logger.error(f"Error extracting media: {e}")
 
+    def _get_image_url(self, media: Dict) -> str:
+        candidates = media.get('image_versions2', {}).get('candidates', [])
+        if candidates:
+            return candidates[0].get('url', '')
+        carousel = media.get('carousel_media', [])
+        if carousel:
+            candidates = carousel[0].get('image_versions2', {}).get('candidates', [])
+            if candidates:
+                return candidates[0].get('url', '')
+        return ''
+
+    def _get_carousel_urls(self, media: Dict) -> list:
+        """Cover, second, and last slide image URLs (whichever exist). Lets the
+        collector decide carousel click-depth from CLIP without extra navigation."""
+        carousel = media.get('carousel_media', [])
+        if not carousel:
+            return []
+        picks = [carousel[0]]
+        if len(carousel) > 1:
+            picks.append(carousel[1])
+        if len(carousel) > 2:
+            picks.append(carousel[-1])
+        urls = []
+        for slide in picks:
+            cands = slide.get('image_versions2', {}).get('candidates', [])
+            if cands:
+                urls.append(cands[0].get('url', ''))
+        return [u for u in urls if u]
+
     def _parse_media_object(self, media: Dict) -> Optional[Dict]:
         try:
-            inventory_source = media.get('inventory_source', '')
             user = media.get('user', {})
             friendship_status = user.get('friendship_status', {})
+            inventory_source = media.get('inventory_source', '')
             is_following = friendship_status.get('following', False)
             is_suggested = (
                 inventory_source in ['mixed_unconnected', 'explore_unconnected', 'suggested_post']
                 or not friendship_status.get('following', True)
             )
-
-            post_data = {
-                'pk': media.get('pk') or media.get('id', ''),
-                'collected_at': datetime.now().isoformat(),
-                'api_source': True,
-                'postLink': self._get_post_link(media),
-                'timestamp': self._get_timestamp(media),
+ 
+            post_link = self._get_post_link(media)
+            if not post_link:
+                return None
+ 
+            return {
+                # ── DB top-level columns ──────────────────────────────────
+                'post_pk':      media.get('pk') or media.get('id', ''),
+                'post_link':    post_link,
+                'collected_at': datetime.now(timezone.utc).isoformat(),
+                'posted_at':    self._get_timestamp(media),
                 'profile_name': self._get_username(media),
-                'profile_url': self._get_profile_url(media),
-                'is_verified': self._is_verified(media),
-                'likes': self._get_like_count(media),
-                'description': self._get_caption(media),
-                'media_type': media.get('media_type', media.get('__typename')),
+                'caption':      self._get_caption(media),
+                'like_count':   self._get_like_count(media),   # INT | None
                 'is_suggested': is_suggested,
                 'is_following': is_following,
+                # ── goes into post_data JSONB ─────────────────────────────
+                'profile_url':  self._get_profile_url(media),
+                'is_verified':  self._is_verified(media),
+                'image_url':    self._get_image_url(media),
+                'carousel_image_urls': self._get_carousel_urls(media),
+                'media_type':   media.get('media_type', media.get('__typename')),
+                'content_type': {
+                    'is_suggested':          is_suggested,
+                    'from_followed_account': not is_suggested,
+                    'follow_action_taken':   None,
+                    'follow_timestamp':      None,
+                },
             }
-
-            if not post_data['postLink']:
-                return None
-
-            post_data['content_type'] = {
-                'is_suggested': is_suggested,
-                'from_followed_account': not is_suggested,
-                'follow_action_taken': None,
-                'follow_timestamp': None
-            }
-
-            return post_data
-
         except Exception as e:
             self.logger.debug(f"Error parsing media: {e}")
             return None
@@ -207,7 +236,7 @@ class SeleniumWireInterceptor:
     def _get_timestamp(self, media: Dict) -> Optional[str]:
         taken_at = media.get('taken_at') or media.get('taken_at_timestamp')
         if taken_at:
-            return str(taken_at)
+            return datetime.fromtimestamp(int(taken_at), tz=timezone.utc).isoformat()
         return None
 
     def _get_username(self, media: Dict) -> str:
@@ -224,12 +253,11 @@ class SeleniumWireInterceptor:
         user = media.get('user', {})
         return user.get('is_verified', False)
 
-    def _get_like_count(self, media: Dict) -> int:
-        """Raw integer like count. Returns 0 if unavailable."""
-        return (media.get('like_count')
-                or media.get('edge_liked_by', {}).get('count')
-                or media.get('edge_media_preview_like', {}).get('count')
-                or 0)
+    def _get_like_count(self, media: Dict) -> Optional[int]:
+        raw = (media.get('like_count') or
+               media.get('edge_liked_by', {}).get('count') or
+               media.get('edge_media_preview_like', {}).get('count'))
+        return int(raw) if raw is not None else None
 
     def _get_caption(self, media: Dict) -> str:
         caption = media.get('caption')

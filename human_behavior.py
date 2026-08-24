@@ -24,9 +24,9 @@ class HumanBehavior:
             float: Delay in seconds (0.5-5s, weighted toward 1-2.5s)
         """
         delays = [
-            random.uniform(0.5, 1.0),   # Quick scroll: 20%
-            random.uniform(1.0, 2.5),   # Normal scroll: 60%  
-            random.uniform(2.5, 5.0)    # Pause to read: 20%
+            random.uniform(0.8, 1.5),   # quick:  20%
+            random.uniform(1.5, 3.0),   # normal: 60%
+            random.uniform(3.0, 6.0)    # pause to read: 20%
         ]
         weights = [0.2, 0.6, 0.2]
         return random.choices(delays, weights=weights)[0]
@@ -49,6 +49,36 @@ class HumanBehavior:
         }
         min_t, max_t = dwell_times.get(post_type, (1.0, 3.0))
         return random.uniform(min_t, max_t)
+
+    def video_watch_fraction(self, fits_bucket: Optional[bool] = None) -> float:
+        """
+        Target watch fraction for a single video, as a share of its duration.
+        Drawn fresh per video; the returned value feeds the progress poller as
+        its stop target.
+
+        fits_bucket switches CLIP-aligned watch time on. It stays None during
+        WarmUp (content-agnostic) and carries the clip result during the
+        interaction phase, making dwell itself an engagement signal:
+
+            None  -> content-agnostic: ~85% skim (0.15-0.35), ~15% tail (0.50-1.0)
+            True  -> on-target: mostly watched through (the dwell signal)
+            False -> off-target: skimmed and scrolled past
+
+        Every branch keeps a tail rather than a flat band — a constant watch
+        fraction, even a per-regime one, is itself a uniform signature.
+        """
+        if fits_bucket is True:
+            if random.random() < 0.65:
+                return random.uniform(0.50, 1.0)   # watched through: ~65%
+            return random.uniform(0.30, 0.50)      # partial: ~35%
+        if fits_bucket is False:
+            if random.random() < 0.85:
+                return random.uniform(0.10, 0.25)  # quick scroll-past: ~85%
+            return random.uniform(0.25, 0.40)      # second glance: ~15%
+        # WarmUp / content-agnostic
+        if random.random() < 0.15:
+            return random.uniform(0.50, 1.0)       # engaged / full watch: ~15%
+        return random.uniform(0.15, 0.35)          # skim: ~85%
     
     def variable_scroll(self, driver) -> Dict:
         """
@@ -82,7 +112,7 @@ class HumanBehavior:
         }
     
     def should_pause(self) -> bool:
-        """Random pause probability: 15%"""
+        """Random pause probability: 40%"""
         return random.random() < 0.40
     
     def should_hover(self) -> bool:
@@ -101,12 +131,38 @@ class HumanBehavior:
         """Short pause after liking (0.5-2.0s)"""
         return random.uniform(0.5, 2.0)
 
-    def should_like_post(self) -> bool:
+    def long_dwell(self, base: float, lo: float = 2.0, hi: float = 4.0) -> float:
+        """Extend dwell x2–4 for on-interest posts (MEDIUM/HIGH tiers)."""
+        return base * random.uniform(lo, hi)
+
+    def should_save_post(self, fits_bucket: Optional[bool] = None) -> bool:
         """
-        Random chance to like a post (10%)
-        Simulates natural engagement behavior
+        Save (bookmark) probability — clip-dependent. Saving is a deliberate act,
+        rarer than a like, so the on-target rate is lower than should_like_post.
+
+            fits_bucket True  -> on-target post, sometimes saved (15%)
+                        False -> off-target, never saved
+                        None  -> classification not ready, rarely saved (2%)
         """
-        return random.random() < 0.05
+        if fits_bucket is True:
+            return random.random() < 0.15
+        if fits_bucket is False:
+            return False
+        return random.random() < 0.02
+
+    def should_follow_suggested(self, fits_bucket: Optional[bool] = None) -> bool:
+        """
+        Follow-suggested probability — clip-dependent. An account that follows
+        every suggested profile regardless of topic is a bot tell; only on-target
+        suggestions are followed.
+
+            fits_bucket True  -> on-target suggestion, usually followed (70%)
+                        False -> off-target, never followed
+                        None  -> classification not ready, not followed
+        """
+        if fits_bucket is True:
+            return random.random() < 0.70
+        return False
     
     def double_tap_likelihood(self) -> bool:
         """People often like by double-tapping the image rather than the heart."""

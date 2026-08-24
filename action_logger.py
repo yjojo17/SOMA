@@ -34,9 +34,9 @@ class ActionLogger:
             """Updated: Store minimal context to avoid redundant data."""
             if post_data:
                 self.current_post_context = {
-                    'post_id': post_data.get('pk'),
+                    'post_pk': post_data.get('post_pk'),
                     'profile_name': post_data.get('profile_name'),
-                    'postLink': post_data.get('postLink')
+                    'post_link': post_data.get('post_link')
                 }
                 self.stats['posts_viewed'] += 1
             else:
@@ -69,7 +69,7 @@ class ActionLogger:
 
     def log_like(self):
         self.log_action('like', {
-            'post_id': self.current_post_context.get('post_id') if self.current_post_context else None,
+            'post_pk': self.current_post_context.get('post_pk') if self.current_post_context else None,
             'username': self.current_post_context.get('profile_name') if self.current_post_context else None
         })
 

@@ -103,7 +103,6 @@ class DatabaseManager:
         session_id: str,
         account_id: str,
         started_at: datetime,
-        experiment_id: Optional[str] = None,
         planned_duration_seconds: Optional[int] = None,
         target_posts: Optional[int] = None,
     ) -> None:
@@ -111,13 +110,12 @@ class DatabaseManager:
             cur.execute(
                 """
                 INSERT INTO sessions
-                    (id, account_id, experiment_id, started_at, planned_duration, target_posts, status)
-                VALUES (%s, %s, %s, %s, make_interval(secs => %s), %s, 'running')
+                    (id, account_id, started_at, planned_duration, target_posts, status)
+                VALUES (%s, %s, %s, make_interval(secs => %s), %s, 'running')
                 """,
                 (
                     session_id,
                     account_id,
-                    experiment_id,
                     started_at,
                     planned_duration_seconds,
                     target_posts,
@@ -153,55 +151,48 @@ class DatabaseManager:
         session_id: str,
         account_id: str,
         posts: List[Dict],
-        experiment_id: Optional[str] = None,
     ) -> Dict[str, int]:
-        """
-        Bulk-insert post observations. Returns {post_pk: db_id} for linking interactions.
-
-        Each post dict must contain: pk, postLink, profile_name, is_suggested, is_following.
-        Everything else is stored in post_data JSONB. feed_position is taken from 'position'
-        if present, else inferred from input order (1-based).
-
-        Input is expected to be deduplicated by the interceptor (one entry per postLink
-        per session), which means one DB row per (session, post). Multiple interaction
-        events in the session that reference the same post all link to that one row.
-        """
         if not posts:
             return {}
 
         rows: List[Tuple] = []
         pks: List[str] = []
         for i, post in enumerate(posts, start=1):
-            pk = post.get('pk') or ''
+            pk = post.get('post_pk') or ''
             pks.append(pk)
 
-            # posted_at: Instagram sends taken_at as a unix timestamp string
+            # posted_at: interceptor now returns ISO string directly
             posted_at = None
-            raw_ts = post.get('timestamp')
+            raw_ts = post.get('posted_at')
             if raw_ts:
                 try:
-                    posted_at = datetime.fromtimestamp(int(raw_ts))
+                    posted_at = datetime.fromisoformat(raw_ts)
                 except (ValueError, TypeError):
                     posted_at = None
 
-            # like_count: expected to be raw int from interceptor
-            raw_likes = post.get('likes')
-            like_count = raw_likes if isinstance(raw_likes, int) else None
+            # clip_score + clip_aligned
+            clip_score      = post.get('clip_score')
+            clip_aligned    = post.get('clip_aligned')
+            clip_top_bucket = post.get('clip_top_bucket')
+            vlm_scores      = post.get('vlm_scores')
 
             rows.append((
-                post.get('collection_timestamp') or datetime.now(),
+                post.get('collected_at') or datetime.now(),
                 account_id,
-                experiment_id,
                 session_id,
-                post.get('position') or i,
+                post.get('feed_position') or i,
                 pk,
-                post.get('postLink'),
+                post.get('post_link'),
                 post.get('profile_name'),
                 posted_at,
-                post.get('description'),  # caption
-                like_count,
+                post.get('caption'),
+                post.get('like_count'),
                 bool(post.get('is_suggested', False)),
                 bool(post.get('is_following', False)),
+                clip_score,
+                clip_aligned,
+                clip_top_bucket,
+                Jsonb(vlm_scores) if vlm_scores else None,
                 Jsonb(post),
             ))
 
@@ -209,17 +200,18 @@ class DatabaseManager:
             cur.executemany(
                 """
                 INSERT INTO posts
-                    (collected_at, account_id, experiment_id, session_id,
-                     feed_position, post_pk, post_link, profile_name,
-                     posted_at, caption, like_count,
-                     is_suggested, is_following, post_data)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    (collected_at, account_id, session_id,
+                    feed_position, post_pk, post_link, profile_name,
+                    posted_at, caption, like_count,
+                    is_suggested, is_following,
+                    clip_score, clip_aligned, clip_top_bucket, vlm_scores,
+                    post_data)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 RETURNING id
                 """,
                 rows,
                 returning=True,
             )
-            # psycopg3 pattern: one row per INSERT, iterate cur.results()
             ids = [cur.fetchone()[0] for _ in cur.results()]
 
         return dict(zip(pks, ids))
@@ -233,7 +225,6 @@ class DatabaseManager:
         account_id: str,
         actions: List[Dict],
         post_pk_to_id: Dict[str, int],
-        experiment_id: Optional[str] = None,
     ) -> None:
         """
         Bulk-insert interaction events from ActionLogger.actions.
@@ -251,13 +242,12 @@ class DatabaseManager:
         for action in actions:
             details = action.get('details') or {}
             post_context = action.get('post_context') or {}
-            post_pk = post_context.get('post_id')
+            post_pk = post_context.get('post_pk')
             post_observation_id = post_pk_to_id.get(post_pk) if post_pk else None
 
             rows.append((
                 action['timestamp'],
                 account_id,
-                experiment_id,
                 session_id,
                 action['action_type'],
                 post_observation_id,
@@ -268,9 +258,25 @@ class DatabaseManager:
             cur.executemany(
                 """
                 INSERT INTO interactions
-                    (occurred_at, account_id, experiment_id, session_id,
+                    (occurred_at, account_id, session_id,
                      interaction_type, post_observation_id, details)
-                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s)
                 """,
                 rows,
             )
+
+    # ------------------------------------------------------------------
+    # budget reads
+    # ------------------------------------------------------------------
+    def count_interactions_since(self, account_id: str, interaction_type: str, since) -> int:
+        """Count interactions of a type for an account since `since` (a datetime).
+        Single source of truth for per-session/-week like and follow budgets."""
+        with self._cursor() as cur:
+            cur.execute(
+                """
+                SELECT count(*) FROM interactions
+                WHERE account_id = %s AND interaction_type = %s AND occurred_at >= %s
+                """,
+                (account_id, interaction_type, since),
+            )
+            return cur.fetchone()[0]
