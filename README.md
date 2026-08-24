@@ -1,13 +1,10 @@
 # Instagram Feed Audit
 
-Sock-puppet audit of Instagram's recommendation feed, built for a master's thesis at
-the University of Potsdam. The system runs a fleet of controlled Firefox profiles,
-scrolls the Instagram timeline like a human would, captures the underlying API
+Sock-puppet audit of Instagram's recommendation feed, built for a master's thesis
+at the Hasso-Plattner-Institut. The system runs a fleet of controlled sock-puppets,
+that scroll the Instagram timeline like a human would, captures the underlying API
 responses from inside the browser, classifies each post against a set of content
 buckets with CLIP, and writes everything to TimescaleDB for statistical analysis.
-
-The research question is whether feed composition differs by the account's declared
-gender and by whether the account interacts (likes, follows) or only scrolls.
 
 > **This repository is research tooling, not a product.** Read
 > [Legal and ethical scope](#legal-and-ethical-scope) before running anything.
@@ -28,9 +25,7 @@ script runs. The extension relays captured bodies through a DOM node that the
 collector drains synchronously.
 
 Captured posts are scored inline by CLIP (ViT-B/32) against the bucket definitions
-in the config. Classification is by softmax over the full candidate set, not by
-thresholding a raw cosine against one prompt — raw CLIP cosines cluster near 0.2
-regardless of content, so an absolute threshold cannot separate classes. Captions
+in the config. Classification is by softmax over the full candidate set. Captions
 are fused into the query at a configurable weight, since topical buckets like News
 and Business carry their signal in text rather than image.
 
@@ -48,7 +43,6 @@ and Business carry their signal in text rather than image.
 | `action_logger.py` | Structured event log for every scroll, pause, like, follow, view. |
 | `database_manager.py` | Synchronous psycopg writer. One connection per session. |
 | `raw_archive.py` | Per-session gzipped JSONL archive of captured responses. |
-| `follow_bot.py` | Builds each account's initial follow graph from a plan file, resumable. |
 | `schema.sql` | TimescaleDB schema. |
 | `docker-compose.yml` | TimescaleDB, Prometheus, Pushgateway, Grafana. |
 
@@ -61,7 +55,6 @@ and Business carry their signal in text rather than image.
 - Docker and Docker Compose
 - `undetected_geckodriver`, `selenium`, `seleniumwire`, `psycopg[binary]`, `pyyaml`,
   `pyvirtualdisplay`, `torch`, `transformers`, `pillow`, `requests`
-- Xvfb, if running headless via virtual display
 
 ## Setup
 
@@ -74,7 +67,7 @@ docker compose up -d
 ```
 
 TimescaleDB, Prometheus and Grafana bind to loopback only. Data lives outside the
-containers under `/home/yjojo/audit/data/` — change the volume paths in
+containers under `/home/audit/data/` — change the volume paths in
 `docker-compose.yml` for your host.
 
 **2. Schema**
@@ -99,7 +92,7 @@ Each account entry:
 ```yaml
 - id: U_MI_W1_BandF_Fit
   email: ...
-  firefox_profile: /home/yjojo/.mozilla/firefox/UserMI1.BandF_Fit
+  firefox_profile: /home/.mozilla/firefox/UserMI1.BandF_Fit
   screen: [1920, 1080]
   window: [1920, 1080]
   role: study              # study | probe
@@ -117,16 +110,6 @@ Top-level keys:
 | `bucket_definitions` | CLIP prompt text per content category. |
 | `save_feed_data` | Whether raw API responses are archived to disk. See below. |
 
-**5. Initial follow graph**
-
-```bash
-python follow_bot.py <account_id>
-python follow_bot.py <account_id> --dry-run
-```
-
-Reads `follow_plans/{id}.json`, appends to `logs/follow_events.csv`, and resumes from
-the first target not yet marked successful.
-
 ## Running
 
 ```bash
@@ -134,7 +117,7 @@ python orchestrator.py
 ```
 
 Sessions run inside a 09:00–23:00 window, twice per weekday and three times per
-weekend day, with roughly a 13% chance that a whole matched group takes the day off
+weekend day, with roughly a 10% chance that a whole matched group takes the day off
 together. State persists in `orchestrator_state.json`.
 
 Single session, for debugging:
@@ -187,25 +170,15 @@ have not consented and are not the research subjects.
 
 Before running it against a live platform you need, at minimum:
 
-- Approval from your institution's ethics committee
 - A documented legal basis under GDPR Art. 6, and Art. 9 / §27 BDSG where the
   content buckets touch special categories such as political opinion
-- A data protection impact assessment under GDPR Art. 35, agreed with your
-  institution's Datenschutzbeauftragte
-- A defined retention period and deletion procedure
 - A minimisation policy covering what is stored and in what form
 
 Publishing collected personal data is separately restricted under §27(4) BDSG.
 Publish aggregates and classification results, not the underlying corpus.
-
-None of this is legal advice. Talk to your DPO.
 
 ---
 
 ## License
 
 GNU Affero General Public License v3.0 or later. See [LICENSE](LICENSE).
-
-AGPL rather than GPL because the collection stack is the kind of thing that gets
-wrapped in a web service; the network clause keeps modifications available to anyone
-using such a service. Copyright remains with the author.
