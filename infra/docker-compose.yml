@@ -10,7 +10,7 @@ services:
       POSTGRES_DB: audit
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
     volumes:
-      - /home/yjojo/audit/data/timescale:/var/lib/postgresql/data
+      - /home/audit/data/timescale:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U audit -d audit"]
       interval: 10s
@@ -42,7 +42,7 @@ services:
       - --storage.tsdb.retention.time=180d
     volumes:
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
-      - /home/yjojo/audit/data/prometheus:/prometheus
+      - /home/audit/data/prometheus:/prometheus
     depends_on:
       - pushgateway
 
@@ -59,7 +59,7 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
     volumes:
       - ./grafana/provisioning:/etc/grafana/provisioning:ro
-      - /home/yjojo/audit/data/grafana:/var/lib/grafana
+      - /home/audit/data/grafana:/var/lib/grafana
     depends_on:
       timescaledb:
         condition: service_healthy
