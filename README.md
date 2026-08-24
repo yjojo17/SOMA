@@ -103,13 +103,6 @@ Each account entry:
   bucket: BandF_Fit
 ```
 
-Top-level keys:
-
-| Key | Meaning |
-| --- | --- |
-| `bucket_definitions` | CLIP prompt text per content category. |
-| `save_feed_data` | Whether raw API responses are archived to disk. See below. |
-
 ## Running
 
 ```bash
