@@ -809,25 +809,6 @@ class ConfigurableNetworkCollector:
             duration = (ended_at - self.action_logger.session_start).total_seconds()
             self.pusher.finalize(duration_seconds=duration, status=status)
 
-    def save_feed_data(self, data):
-        """Legacy JSONL dump, kept as dead code. DB + raw archive are the source of truth."""
-        if not data:
-            self.logger.warning("No data to save")
-            return None
-
-        output_dir = Path('feed_data')
-        output_dir.mkdir(exist_ok=True)
-
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"feed_{self.profile_id}_{timestamp}.json"
-        filepath = output_dir / filename
-
-        with open(filepath, 'w', encoding='utf-8') as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-
-        self.logger.info(f"Saved {len(data)} posts to {filename}")
-        return str(filepath)
-
     def cleanup(self):
         if self.vlm_service:
             self.vlm_service.shutdown()
