@@ -69,6 +69,7 @@ class ConfigurableNetworkCollector:
         # CLIP-aligned watch time: off during WarmUp, set true for the interaction
         # phase so dwell length tracks whether a post is on-target.
         self.clip_aligned_watch = self.config['collection_settings'].get('clip_aligned_watch', False)
+        self.save_feed_data = self.config['collection_settings'].get('save_feed_data', False)
         # Minimum calibrated probability for the target bucket before a post counts
         # as on-target (gates likes and clip-aligned watch). Softmax runs over the
         # full category set
@@ -546,7 +547,7 @@ class ConfigurableNetworkCollector:
         )
         
         self.action_logger = ActionLogger(self.profile_id, session_id=self.session_id)
-        self.archive = RawArchive(self.profile_id, self.session_id)
+        self.archive = RawArchive(self.profile_id, self.session_id) if self.save_feed_data else None
         self.interceptor = ExtensionInterceptor(archive=self.archive)
 
         session_duration_minutes = self.human_behavior.realistic_session_duration()
